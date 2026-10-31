@@ -115,6 +115,8 @@ const App = () => {
   const [cashTendered, setCashTendered] = useState('');
   const [utangCustomer, setUtangCustomer] = useState('');
   const [showUtangInput, setShowUtangInput] = useState(false);
+  const [activeHulogId, setActiveHulogId] = useState(null);
+  const [hulogAmount, setHulogAmount] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
 
   // GCash / Bank States
@@ -404,14 +406,34 @@ const App = () => {
   };
 
   // ==========================================
-  // 📱 GCASH / BANK & 🖨️ PRINT HANDLERS
+  // 📱 GCASH / BANK / E-LOAD & 🖨️ PRINT HANDLERS
   // ==========================================
+  const selectGcashMode = (mode) => {
+    setGcashType(mode);
+    const num = parseFloat(gcashAmount);
+    if (num > 0) {
+      if (mode === 'E-LOAD') {
+        setGcashFee('5');
+      } else {
+        setGcashFee(String(Math.max(5, Math.ceil(num / 500) * 10)));
+      }
+    } else {
+      setGcashFee(mode === 'E-LOAD' ? '5' : '');
+    }
+  };
+
   const handleGcashAmountChange = (val) => {
     setGcashAmount(val);
     const num = parseFloat(val);
     if (num > 0) {
-      const suggestedFee = Math.max(5, Math.ceil(num / 500) * 10);
-      setGcashFee(String(suggestedFee));
+      if (gcashType === 'E-LOAD') {
+        // Fixed +₱5 patong for all E-Load amounts
+        setGcashFee('5');
+      } else {
+        // Standard Sari-Sari Store Bracket: ₱10 fee per ₱500
+        const suggestedFee = Math.max(5, Math.ceil(num / 500) * 10);
+        setGcashFee(String(suggestedFee));
+      }
     } else {
       setGcashFee('');
     }
@@ -648,12 +670,76 @@ const App = () => {
       puhunan: prev.puhunan + record.cost,
       serviceProfit: (prev.serviceProfit || 0) + (record.serviceRevenue || 0)
     }));
+    setActiveHulogId(null);
+    setHulogAmount('');
     playBeep('success');
     syncToSheets('payUtang', { record, utangList: updatedUtang });
     showMessage(
-      `Bayad na ang utang ni ${record.customer} (₱${record.amount.toFixed(2)})!`,
+      `Buong bayad na ang utang ni ${record.customer} (₱${record.amount.toFixed(2)})!`,
       'success'
     );
+  };
+
+  const handlePartialUtangPayment = (record) => {
+    const paid = parseFloat(hulogAmount);
+    if (!paid || paid <= 0) {
+      playBeep('error');
+      return showMessage('Ilagay kung magkano ang ihuhulog na bayad.', 'error');
+    }
+
+    // If they pay the full amount (or more), treat it as full payment
+    if (paid >= record.amount) {
+      return markUtangPaid(record);
+    }
+
+    // Proportional split so Puhunan, Tubo, and Service Profit stay 100% accurate
+    const ratio = paid / record.amount;
+    const paidCost = record.cost * ratio;
+    const paidProfit = record.profit * ratio;
+    const paidService = (record.serviceRevenue || 0) * ratio;
+    const remainingBalance = record.amount - paid;
+
+    const updatedRecord = {
+      ...record,
+      amount: remainingBalance,
+      cost: record.cost - paidCost,
+      profit: record.profit - paidProfit,
+      serviceRevenue: (record.serviceRevenue || 0) - paidService,
+      itemsSummary: `${record.itemsSummary} [Hulog: -₱${paid.toFixed(2)}]`
+    };
+
+    const updatedUtang = utangList.map((u) =>
+      u.id === record.id ? updatedRecord : u
+    );
+
+    setUtangList(updatedUtang);
+    setDailyStats((prev) => ({
+      sales: prev.sales + paid,
+      profit: prev.profit + paidProfit,
+      puhunan: prev.puhunan + paidCost,
+      serviceProfit: (prev.serviceProfit || 0) + paidService
+    }));
+
+    // Sends partial payment to Google Sheets Ledger under 'BAYAD UTANG'
+    const ledgerPartialRecord = {
+      customer: `${record.customer} (HULOG)`,
+      amount: paid,
+      profit: paidProfit,
+      itemsSummary: `Hulog sa utang (Natitirang balanse: ₱${remainingBalance.toFixed(2)})`
+    };
+
+    playBeep('success');
+    syncToSheets('payUtang', {
+      record: ledgerPartialRecord,
+      utangList: updatedUtang
+    });
+
+    showMessage(
+      `Tinanggap ang ₱${paid.toFixed(2)} na hulog ni ${record.customer}! Natitirang utang: ₱${remainingBalance.toFixed(2)}`,
+      'success'
+    );
+    setActiveHulogId(null);
+    setHulogAmount('');
   };
 
   // ==========================================
@@ -1001,7 +1087,7 @@ const App = () => {
                   }`}
                 >
                   <Smartphone className="w-5 h-5 sm:w-6 sm:h-6" />
-                  <span className="leading-tight">GCash / Bank</span>
+                  <span className="leading-tight">GCash / Load</span>
                 </button>
 
                 <button
@@ -1065,12 +1151,12 @@ const App = () => {
                 </div>
               )}
 
-              {/* DRAWER 2: GCASH / BANK IN & OUT */}
+              {/* DRAWER 2: GCASH / BANK & E-LOAD (+₱5 FIXED FEE) */}
               {activeDrawer === 'gcash' && (
                 <div className="bg-white p-4 sm:p-6 rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-blue-300 shadow-lg space-y-4 sm:space-y-5">
                   <div className="flex justify-between items-center">
                     <h3 className="text-lg sm:text-2xl font-black text-blue-900 flex items-center gap-2">
-                      <Smartphone className="w-6 h-6 sm:w-7 sm:h-7" /> GCash / Bank
+                      <Smartphone className="w-6 h-6 sm:w-7 sm:h-7" /> GCash, Bank at E-Load
                     </h3>
                     <button
                       onClick={() => setActiveDrawer(null)}
@@ -1080,11 +1166,12 @@ const App = () => {
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2.5 sm:gap-3">
+                  {/* 3 MODE BUTTONS: CASH-IN, CASH-OUT, E-LOAD */}
+                  <div className="grid grid-cols-3 gap-2 sm:gap-3">
                     <button
                       type="button"
-                      onClick={() => setGcashType('CASH-IN')}
-                      className={`py-3 sm:py-4 px-2 rounded-xl sm:rounded-2xl font-black text-sm sm:text-xl border-2 sm:border-4 transition ${
+                      onClick={() => selectGcashMode('CASH-IN')}
+                      className={`py-3 sm:py-4 px-2 rounded-xl sm:rounded-2xl font-black text-xs sm:text-xl border-2 sm:border-4 transition ${
                         gcashType === 'CASH-IN'
                           ? 'bg-blue-600 text-white border-blue-800 shadow-md'
                           : 'bg-gray-100 text-gray-700 border-gray-300'
@@ -1094,8 +1181,8 @@ const App = () => {
                     </button>
                     <button
                       type="button"
-                      onClick={() => setGcashType('CASH-OUT')}
-                      className={`py-3 sm:py-4 px-2 rounded-xl sm:rounded-2xl font-black text-sm sm:text-xl border-2 sm:border-4 transition ${
+                      onClick={() => selectGcashMode('CASH-OUT')}
+                      className={`py-3 sm:py-4 px-2 rounded-xl sm:rounded-2xl font-black text-xs sm:text-xl border-2 sm:border-4 transition ${
                         gcashType === 'CASH-OUT'
                           ? 'bg-indigo-600 text-white border-indigo-800 shadow-md'
                           : 'bg-gray-100 text-gray-700 border-gray-300'
@@ -1103,14 +1190,30 @@ const App = () => {
                     >
                       📤 CASH-OUT
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => selectGcashMode('E-LOAD')}
+                      className={`py-3 sm:py-4 px-2 rounded-xl sm:rounded-2xl font-black text-xs sm:text-xl border-2 sm:border-4 transition ${
+                        gcashType === 'E-LOAD'
+                          ? 'bg-emerald-600 text-white border-emerald-800 shadow-md'
+                          : 'bg-gray-100 text-gray-700 border-gray-300'
+                      }`}
+                    >
+                      📲 E-LOAD (+₱5)
+                    </button>
                   </div>
 
                   <div>
                     <label className="block text-gray-700 font-black mb-2 text-sm sm:text-lg">
-                      Pumili o I-type ang Halaga (₱):
+                      {gcashType === 'E-LOAD'
+                        ? 'Pumili o I-type ang Load (Laging +₱5 Tubo):'
+                        : 'Pumili o I-type ang Halaga ng GCash/Bank (₱):'}
                     </label>
                     <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-3">
-                      {[100, 200, 500, 1000, 2000, 5000].map((amt) => (
+                      {(gcashType === 'E-LOAD'
+                        ? [10, 15, 20, 30, 50, 100]
+                        : [100, 200, 500, 1000, 2000, 5000]
+                      ).map((amt) => (
                         <button
                           key={amt}
                           type="button"
@@ -1129,25 +1232,25 @@ const App = () => {
                     <div className="grid grid-cols-2 gap-3 sm:gap-4">
                       <div>
                         <span className="text-gray-600 font-bold text-xs sm:text-base">
-                          Halaga (₱):
+                          {gcashType === 'E-LOAD' ? 'Halaga ng Load (₱):' : 'Halaga (₱):'}
                         </span>
                         <input
                           type="number"
                           value={gcashAmount}
                           onChange={(e) => handleGcashAmountChange(e.target.value)}
-                          placeholder="1000"
+                          placeholder={gcashType === 'E-LOAD' ? '50' : '1000'}
                           className="w-full mt-1 p-3 sm:p-4 border-2 sm:border-4 border-blue-300 rounded-xl sm:rounded-2xl text-xl sm:text-3xl font-black text-center"
                         />
                       </div>
                       <div>
                         <span className="text-gray-600 font-bold text-xs sm:text-base">
-                          Tubo / Fee (₱):
+                          Tubo / Patong Mo (₱):
                         </span>
                         <input
                           type="number"
                           value={gcashFee}
                           onChange={(e) => setGcashFee(e.target.value)}
-                          placeholder="20"
+                          placeholder={gcashType === 'E-LOAD' ? '5' : '20'}
                           className="w-full mt-1 p-3 sm:p-4 border-2 sm:border-4 border-emerald-400 rounded-xl sm:rounded-2xl text-xl sm:text-3xl font-black text-emerald-700 text-center"
                         />
                       </div>
@@ -1156,7 +1259,7 @@ const App = () => {
 
                   {parseFloat(gcashAmount) > 0 && (
                     <div className="bg-blue-50 p-3 sm:p-4 rounded-xl sm:rounded-2xl border-2 border-blue-300 space-y-1">
-                      {gcashType === 'CASH-IN' ? (
+                      {gcashType === 'CASH-IN' && (
                         <>
                           <p className="text-base sm:text-xl font-black text-blue-900">
                             💵 Kunin sa Customer: ₱
@@ -1169,7 +1272,8 @@ const App = () => {
                             {parseFloat(gcashAmount).toFixed(2)}
                           </p>
                         </>
-                      ) : (
+                      )}
+                      {gcashType === 'CASH-OUT' && (
                         <>
                           <p className="text-base sm:text-xl font-black text-indigo-900">
                             💵 Ibigay na Cash: ₱
@@ -1178,6 +1282,19 @@ const App = () => {
                           <p className="text-sm sm:text-lg font-bold text-emerald-700">
                             ✅ Kunin na Tubo / Fee: ₱
                             {(parseFloat(gcashFee) || 0).toFixed(2)}
+                          </p>
+                        </>
+                      )}
+                      {gcashType === 'E-LOAD' && (
+                        <>
+                          <p className="text-base sm:text-xl font-black text-emerald-900">
+                            💵 Kunin na Bayad sa Load: ₱
+                            {(
+                              parseFloat(gcashAmount) + (parseFloat(gcashFee) || 0)
+                            ).toFixed(2)}
+                          </p>
+                          <p className="text-sm sm:text-lg font-bold text-gray-700">
+                            📲 I-load sa Customer: ₱{parseFloat(gcashAmount).toFixed(2)} (Tubo: +₱{(parseFloat(gcashFee) || 0).toFixed(2)})
                           </p>
                         </>
                       )}
@@ -1708,21 +1825,6 @@ const App = () => {
                 <RotateCcw className="w-5 h-5" /> Bagong Araw (Reset Kita Ngayon)
               </button>
 
-              <button
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      'SIGURADO KA BA? Buburahin nito ang lumang data na naka-save sa browser na ito.'
-                    )
-                  ) {
-                    localStorage.clear();
-                    window.location.reload();
-                  }
-                }}
-                className="bg-red-100 hover:bg-red-200 text-red-800 px-4 py-3 sm:px-5 rounded-xl sm:rounded-2xl font-bold text-sm sm:text-base flex items-center justify-center gap-2"
-              >
-                <Trash2 className="w-5 h-5" /> Burahin ang Saved Data (Reset Device)
-              </button>
             </div>
 
             {/* RECENT GCASH & PRINT LOGS */}
@@ -1773,30 +1875,103 @@ const App = () => {
                     utangList.map((u) => (
                       <div
                         key={u.id}
-                        className="p-3.5 sm:p-4 rounded-xl sm:rounded-2xl bg-amber-50/60 border-2 border-amber-200 flex justify-between items-center gap-3"
+                        className="p-3.5 sm:p-4 rounded-xl sm:rounded-2xl bg-amber-50/60 border-2 border-amber-200 space-y-3"
                       >
-                        <div className="min-w-0">
-                          <h4 className="text-lg sm:text-2xl font-black text-gray-900 truncate">
-                            {u.customer}
-                          </h4>
-                          <p className="text-gray-600 font-bold text-sm sm:text-base">
-                            {u.itemsSummary}
-                          </p>
-                          <p className="text-gray-400 text-xs sm:text-sm font-semibold">
-                            {u.date}
-                          </p>
-                        </div>
-                        <div className="text-right space-y-1.5 sm:space-y-2 shrink-0">
-                          <div className="text-xl sm:text-3xl font-black text-amber-800">
-                            ₱{u.amount.toFixed(2)}
+                        <div className="flex justify-between items-start gap-3">
+                          <div className="min-w-0">
+                            <h4 className="text-lg sm:text-2xl font-black text-gray-900 truncate">
+                              {u.customer}
+                            </h4>
+                            <p className="text-gray-600 font-bold text-sm sm:text-base">
+                              {u.itemsSummary}
+                            </p>
+                            <p className="text-gray-400 text-xs sm:text-sm font-semibold">
+                              {u.date}
+                            </p>
                           </div>
+                          <div className="text-right shrink-0">
+                            <span className="text-xs font-bold text-amber-700 block">
+                              Balanse:
+                            </span>
+                            <div className="text-xl sm:text-3xl font-black text-amber-800">
+                              ₱{u.amount.toFixed(2)}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* ACTION BUTTONS: HULOG (PARTIAL) OR BUONG BAYAD */}
+                        <div className="flex gap-2 justify-end pt-1">
                           <button
-                            onClick={() => markUtangPaid(u)}
-                            className="bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-1.5 sm:px-5 sm:py-2 rounded-xl font-black text-sm sm:text-lg"
+                            type="button"
+                            onClick={() => {
+                              if (activeHulogId === u.id) {
+                                setActiveHulogId(null);
+                                setHulogAmount('');
+                              } else {
+                                setActiveHulogId(u.id);
+                                setHulogAmount('');
+                              }
+                            }}
+                            className="bg-amber-200 hover:bg-amber-300 text-amber-900 px-3.5 py-2 rounded-xl font-black text-sm sm:text-base"
                           >
-                            ✓ Bayad Na
+                            💵 Hulog (Partial)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => markUtangPaid(u)}
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl font-black text-sm sm:text-base"
+                          >
+                            ✓ Buong Bayad
                           </button>
                         </div>
+
+                        {/* COLLAPSIBLE HULOG INPUT DRAWER */}
+                        {activeHulogId === u.id && (
+                          <div className="bg-white p-3 rounded-xl border-2 border-amber-400 space-y-2.5">
+                            <label className="block text-amber-900 font-black text-sm sm:text-base">
+                              Magkano ang ihuhulog ni {u.customer}?
+                            </label>
+                            <div className="flex gap-1.5 flex-wrap">
+                              {[20, 50, 100, 200, 500]
+                                .filter((amt) => amt < u.amount)
+                                .map((amt) => (
+                                  <button
+                                    key={amt}
+                                    type="button"
+                                    onClick={() => setHulogAmount(String(amt))}
+                                    className="px-3 py-1 bg-amber-100 hover:bg-amber-200 text-amber-900 rounded-lg font-black text-sm border border-amber-300"
+                                  >
+                                    ₱{amt}
+                                  </button>
+                                ))}
+                            </div>
+                            <div className="flex gap-2">
+                              <input
+                                type="number"
+                                value={hulogAmount}
+                                onChange={(e) => setHulogAmount(e.target.value)}
+                                placeholder="Halaga (₱)..."
+                                className="flex-1 p-2.5 border-2 border-amber-300 rounded-xl font-black text-lg text-center"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => handlePartialUtangPayment(u)}
+                                className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl font-black text-sm sm:text-base"
+                              >
+                                I-Save ang Hulog
+                              </button>
+                            </div>
+                            {parseFloat(hulogAmount) > 0 &&
+                              parseFloat(hulogAmount) < u.amount && (
+                                <p className="text-xs sm:text-sm font-bold text-gray-600">
+                                  Natitirang utang pagkatapos ng hulog:{' '}
+                                  <span className="text-amber-800 font-black">
+                                    ₱{(u.amount - parseFloat(hulogAmount)).toFixed(2)}
+                                  </span>
+                                </p>
+                              )}
+                          </div>
+                        )}
                       </div>
                     ))
                   )}
