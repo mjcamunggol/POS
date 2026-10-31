@@ -18,7 +18,9 @@ import {
   RotateCcw,
   Smartphone,
   Printer,
-  Trash2
+  Trash2,
+  Camera,
+  CameraOff
 } from 'lucide-react';
 
 // ==========================================
@@ -142,6 +144,13 @@ const App = () => {
   const [message, setMessage] = useState(null);
   const toastTimerRef = useRef(null);
   const scanBufferRef = useRef({ chars: '', lastTime: 0 });
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [lastScannedText, setLastScannedText] = useState('');
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const scanIntervalRef = useRef(null);
+  const lastCameraScanRef = useRef({ code: '', time: 0 });
+  const processScanRef = useRef(null);
   const cartSectionRef = useRef(null);
 
   // Save to localStorage automatically
@@ -351,6 +360,101 @@ const App = () => {
     },
     [activeTab, inventory, addToCart, playBeep, showMessage]
   );
+
+  // Keep latest scan handler in a ref so the camera loop never uses stale inventory/cart state
+  useEffect(() => {
+    processScanRef.current = processBarcodeScan;
+  }, [processBarcodeScan]);
+
+  const stopCamera = useCallback(() => {
+    if (scanIntervalRef.current) {
+      clearInterval(scanIntervalRef.current);
+      scanIntervalRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    setCameraOpen(false);
+    setLastScannedText('');
+  }, []);
+
+  const startCamera = useCallback(async () => {
+    try {
+      // Load BarcodeDetector polyfill automatically for iOS Safari / older browsers
+      if (!('BarcodeDetector' in window)) {
+        const mod = await import(
+          /* @vite-ignore */ 'https://fastly.jsdelivr.net/npm/barcode-detector@2/dist/es/pure.min.js'
+        );
+        window.BarcodeDetector = mod.BarcodeDetector;
+      }
+
+      const detector = new window.BarcodeDetector({
+        formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code']
+      });
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false
+      });
+
+      streamRef.current = stream;
+      setCameraOpen(true);
+
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(() => {});
+        }
+      }, 100);
+
+      // Continuously check camera frames every 250ms
+      scanIntervalRef.current = setInterval(async () => {
+        if (!videoRef.current || videoRef.current.readyState < 2) return;
+        try {
+          const barcodes = await detector.detect(videoRef.current);
+          if (barcodes.length > 0) {
+            const rawCode = barcodes[0].rawValue?.trim();
+            if (!rawCode) return;
+
+            const now = Date.now();
+            // 2-second cooldown for the exact same barcode to prevent accidental double scans
+            if (
+              lastCameraScanRef.current.code === rawCode &&
+              now - lastCameraScanRef.current.time < 2000
+            ) {
+              return;
+            }
+
+            lastCameraScanRef.current = { code: rawCode, time: now };
+            setLastScannedText(rawCode);
+
+            if (processScanRef.current) {
+              processScanRef.current(rawCode);
+            }
+          }
+        } catch {
+          // Ignore single-frame decode errors
+        }
+      }, 250);
+    } catch {
+      playBeep('error');
+      showMessage(
+        'Hindi mabuksan ang camera. Siguraduhing naka-Allow ang Camera permission at naka-HTTPS.',
+        'error'
+      );
+      stopCamera();
+    }
+  }, [playBeep, showMessage, stopCamera]);
+
+  // Clean up camera if user leaves the page
+  useEffect(() => {
+    return () => stopCamera();
+  }, [stopCamera]);
 
   // Global Hardware Scanner Listener
   useEffect(() => {
@@ -976,11 +1080,59 @@ const App = () => {
           <div className="flex flex-col lg:flex-row gap-5 sm:gap-8">
             {/* LEFT COLUMN: SEARCH + 3 QUICK DRAWERS */}
             <div className="flex-1 space-y-4 sm:space-y-5">
-              {/* SEARCH BAR */}
-              <div className="bg-white p-4 sm:p-6 rounded-2xl sm:rounded-3xl shadow-md border-2 sm:border-4 border-emerald-100">
-                <label className="block text-gray-800 font-black mb-2 sm:mb-3 text-lg sm:text-3xl">
-                  🔍 I-scan o I-type ang Paninda:
-                </label>
+              {/* SEARCH BAR + MOBILE CAMERA SCANNER */}
+              <div className="bg-white p-4 sm:p-6 rounded-2xl sm:rounded-3xl shadow-md border-2 sm:border-4 border-emerald-100 space-y-3">
+                <div className="flex justify-between items-center gap-2">
+                  <label className="block text-gray-800 font-black text-lg sm:text-3xl">
+                    🔍 I-scan o I-type ang Paninda:
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => (cameraOpen ? stopCamera() : startCamera())}
+                    className={`px-3.5 py-2.5 sm:px-5 sm:py-3 rounded-xl sm:rounded-2xl font-black text-xs sm:text-lg flex items-center gap-2 shadow-sm transition shrink-0 ${
+                      cameraOpen
+                        ? 'bg-red-600 text-white hover:bg-red-700'
+                        : 'bg-emerald-600 text-white hover:bg-emerald-700'
+                    }`}
+                  >
+                    {cameraOpen ? (
+                      <>
+                        <CameraOff className="w-5 h-5 sm:w-6 sm:h-6" />
+                        <span></span>
+                      </>
+                    ) : (
+                      <>
+                        <Camera className="w-5 h-5 sm:w-6 sm:h-6" />
+                        <span></span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {/* LIVE CAMERA VIEWFINDER (CONTINUOUS SCANNING) */}
+                {cameraOpen && (
+                  <div className="relative rounded-2xl overflow-hidden bg-black border-4 border-emerald-500 shadow-inner">
+                    <video
+                      ref={videoRef}
+                      playsInline
+                      muted
+                      className="w-full h-52 sm:h-64 object-cover"
+                    />
+                    {/* Green Target Box Overlay */}
+                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                      <div className="w-3/4 h-24 border-4 border-emerald-400 rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]" />
+                    </div>
+                    <div className="bg-gray-900/90 text-white px-4 py-2.5 flex justify-between items-center text-xs sm:text-base font-bold">
+                      <span>🟢 Itapat ang barcode sa berdeng kahon (Tuloy-tuloy ang scan)</span>
+                      {lastScannedText && (
+                        <span className="bg-emerald-600 px-2.5 py-1 rounded-lg font-black">
+                          ✓ {lastScannedText}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 <div className="relative">
                   <Search className="absolute left-3.5 sm:left-6 top-1/2 -translate-y-1/2 text-emerald-500 w-6 h-6 sm:w-10 sm:h-10" />
                   <input
@@ -1610,9 +1762,38 @@ const App = () => {
               {/* LEFT: ITEM DETAILS */}
               <div className="space-y-4 sm:space-y-6">
                 <div>
-                  <label className="block text-gray-800 font-black mb-1.5 sm:mb-2 text-base sm:text-2xl">
-                    1. Barcode (I-scan o Iwanang Blanko):
-                  </label>
+                  <div className="flex justify-between items-center mb-1.5 sm:mb-2">
+                    <label className="block text-gray-800 font-black text-base sm:text-2xl">
+                      1. Barcode (I-scan o Blanko):
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => (cameraOpen ? stopCamera() : startCamera())}
+                      className={`px-3 py-1.5 rounded-xl font-black text-xs sm:text-base flex items-center gap-1.5 ${
+                        cameraOpen
+                          ? 'bg-red-600 text-white'
+                          : 'bg-emerald-600 text-white'
+                      }`}
+                    >
+                      {cameraOpen ? <CameraOff className="w-4 h-4" /> : <Camera className="w-4 h-4" />}
+                      <span>{cameraOpen ? 'Isara Camera' : '📷 I-scan'}</span>
+                    </button>
+                  </div>
+
+                  {cameraOpen && (
+                    <div className="mb-3 relative rounded-2xl overflow-hidden bg-black border-4 border-emerald-500">
+                      <video
+                        ref={videoRef}
+                        playsInline
+                        muted
+                        className="w-full h-48 object-cover"
+                      />
+                      <div className="bg-gray-900 text-white px-3 py-2 text-xs sm:text-sm font-bold text-center">
+                        🟢 Itapat ang barcode ng bagong paninda
+                      </div>
+                    </div>
+                  )}
+
                   <input
                     type="text"
                     value={newStock.barcode}
