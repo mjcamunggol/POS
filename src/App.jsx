@@ -1776,7 +1776,7 @@ const App = () => {
                       }`}
                     >
                       {cameraOpen ? <CameraOff className="w-4 h-4" /> : <Camera className="w-4 h-4" />}
-                      <span>{cameraOpen ? 'Isara Camera' : '📷 I-scan'}</span>
+                      <span>{cameraOpen ? 'Isara Camera' : ''}</span>
                     </button>
                   </div>
 
