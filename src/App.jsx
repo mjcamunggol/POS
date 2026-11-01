@@ -39,8 +39,16 @@ const normalizeItem = (item) => {
     .map((b) => ({
       qty: Number(b.qty),
       cost: Number(b.cost),
-      price: Number(b.price)
-    }));
+      price: Number(b.price),
+      expiryDate: b.expiryDate || ''
+    }))
+    // Unahin ibenta ang batch na may pinakamalapit na expiration date (FEFO)
+    .sort((a, b) => {
+      if (a.expiryDate && b.expiryDate) return a.expiryDate.localeCompare(b.expiryDate);
+      if (a.expiryDate) return -1;
+      if (b.expiryDate) return 1;
+      return 0;
+    });
 
   const totalQty = validBatches.reduce((sum, b) => sum + b.qty, 0);
 
@@ -50,19 +58,22 @@ const normalizeItem = (item) => {
       batches: [],
       qty: 0,
       cost: Number(item.cost) || 0,
-      price: Number(item.price) || 0
+      price: Number(item.price) || 0,
+      nearestExpiry: ''
     };
   }
 
   const activePrice = Math.max(...validBatches.map((b) => b.price));
   const currentCost = validBatches[0].cost;
+  const nearestExpiry = validBatches.find((b) => b.expiryDate)?.expiryDate || '';
 
   return {
     ...item,
     batches: validBatches,
     qty: totalQty,
     cost: currentCost,
-    price: activePrice
+    price: activePrice,
+    nearestExpiry
   };
 };
 
@@ -138,7 +149,8 @@ const App = () => {
     qty: '',
     packCost: '',
     targetProfit: '',
-    targetPrice: ''
+    targetPrice: '',
+    expiryDate: ''
   });
 
   const [message, setMessage] = useState(null);
@@ -876,7 +888,7 @@ const App = () => {
     setNewStock((prev) => ({ ...prev, targetPrice: Math.ceil(current).toFixed(2) }));
   };
 
-  const handleSaveStock = () => {
+const handleSaveStock = () => {
     const qtyNum = parseInt(newStock.qty, 10);
     const packCostNum = parseFloat(newStock.packCost);
     const newPrice = parseFloat(newStock.targetPrice);
@@ -923,7 +935,13 @@ const App = () => {
         showMessage(`Nadagdagan ng ${qtyNum} pcs ang ${existing.name}!`, 'success');
       }
 
-      updatedBatches.push({ qty: qtyNum, cost: unitCost, price: newPrice });
+      updatedBatches.push({
+        qty: qtyNum,
+        cost: unitCost,
+        price: newPrice,
+        expiryDate: newStock.expiryDate || ''
+      });
+
       updatedInv[existingIndex] = normalizeItem({
         ...existing,
         barcode: cleanBarcode || existing.barcode,
@@ -935,7 +953,14 @@ const App = () => {
         id,
         barcode: cleanBarcode || `ITEM-${id}`,
         name: newStock.name.trim(),
-        batches: [{ qty: qtyNum, cost: unitCost, price: newPrice }]
+        batches: [
+          {
+            qty: qtyNum,
+            cost: unitCost,
+            price: newPrice,
+            expiryDate: newStock.expiryDate || ''
+          }
+        ]
       });
       updatedInv = [...inventory, newItem];
       showMessage(`Bagong paninda na-save: ${newItem.name}`, 'success');
@@ -944,14 +969,51 @@ const App = () => {
     setInventory(updatedInv);
     playBeep('success');
     syncToSheets('addStock', { item: newStock, inventory: updatedInv });
+    
     setNewStock({
       barcode: '',
       name: '',
       qty: '',
       packCost: '',
       targetProfit: '',
-      targetPrice: ''
+      targetPrice: '',
+      expiryDate: ''
     });
+  };
+
+  const handleRemoveExpiredBatch = (itemId, batchIndex) => {
+    const targetItem = inventory.find((i) => i.id === itemId);
+    if (!targetItem) return;
+    const targetBatch = targetItem.batches[batchIndex];
+    if (!targetBatch) return;
+
+    if (
+      !window.confirm(
+        `Alisin sa stock ang ${targetBatch.qty} pcs ng ${targetItem.name} (Expiry: ${targetBatch.expiryDate})?`
+      )
+    ) {
+      return;
+    }
+
+    const updatedInv = inventory.map((item) => {
+      if (item.id !== itemId) return item;
+      const remainingBatches = item.batches.filter((_, idx) => idx !== batchIndex);
+      return normalizeItem({ ...item, batches: remainingBatches });
+    });
+
+    setInventory(updatedInv);
+    playBeep('success');
+    syncToSheets('recordExpired', {
+      name: targetItem.name,
+      qty: targetBatch.qty,
+      lossCost: targetBatch.qty * targetBatch.cost,
+      expiryDate: targetBatch.expiryDate,
+      inventory: updatedInv
+    });
+    showMessage(
+      `Inalis na ang ${targetBatch.qty} pcs na expired/nasirang ${targetItem.name}.`,
+      'success'
+    );
   };
 
   // ==========================================
@@ -973,6 +1035,28 @@ const App = () => {
   );
 
   const lowStockItems = inventory.filter((item) => item.qty <= 5);
+  const expiringBatches = inventory.flatMap((item) =>
+    (item.batches || [])
+      .map((batch, batchIndex) => {
+        if (!batch.expiryDate) return null;
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const exp = new Date(batch.expiryDate + 'T00:00:00');
+        const daysLeft = Math.ceil((exp - today) / (1000 * 60 * 60 * 24));
+        if (daysLeft > 14) return null; // Ipakita lang kung 14 days o mas mababa na lang
+        return {
+          itemId: item.id,
+          name: item.name,
+          batchIndex,
+          qty: batch.qty,
+          cost: batch.cost,
+          price: batch.price,
+          expiryDate: batch.expiryDate,
+          daysLeft
+        };
+      })
+      .filter(Boolean)
+  );
   const matchedExistingStock = inventory.find(
     (i) =>
       (newStock.barcode.trim() && i.barcode === newStock.barcode.trim()) ||
@@ -1856,6 +1940,30 @@ const App = () => {
                       placeholder="Hal. 300"
                     />
                   </div>
+                  <div>
+                  <label className="block text-gray-800 font-black mb-1.5 sm:mb-2 text-base sm:text-2xl">
+                    📅 Expiration Date (Optional — kung pagkain/gamot):
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="date"
+                      value={newStock.expiryDate || ''}
+                      onChange={(e) =>
+                        setNewStock({ ...newStock, expiryDate: e.target.value })
+                      }
+                      className="flex-1 p-3.5 sm:p-4 border-2 sm:border-4 border-gray-300 rounded-xl sm:rounded-2xl text-lg sm:text-2xl font-bold focus:border-emerald-500 bg-white"
+                    />
+                    {newStock.expiryDate && (
+                      <button
+                        type="button"
+                        onClick={() => setNewStock({ ...newStock, expiryDate: '' })}
+                        className="px-4 bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold rounded-xl text-sm sm:text-base"
+                      >
+                        Burahin
+                      </button>
+                    )}
+                  </div>
+                </div>
                 </div>
               </div>
 
@@ -2200,6 +2308,61 @@ const App = () => {
                     ))
                   )}
                 </div>
+              </div>
+            </div>
+            {/* EXPIRING / EXPIRED ITEMS ALERT CARD */}
+            <div className="bg-white rounded-2xl sm:rounded-3xl shadow-xl border-2 sm:border-4 border-orange-200 overflow-hidden">
+              <div className="bg-orange-50 p-4 sm:p-6 border-b-2 border-orange-200">
+                <h3 className="text-lg sm:text-2xl font-black text-orange-900 flex items-center gap-2">
+                  <AlertTriangle className="w-6 h-6 sm:w-7 sm:h-7 text-orange-600" />
+                  Malapit nang Ma-Expire / Expired ({expiringBatches.length})
+                </h3>
+                <p className="text-orange-800 font-semibold text-xs sm:text-base mt-0.5">
+                  Mga panindang mag-e-expire sa loob ng 14 araw (Ibenta agad o alisin kung sira na):
+                </p>
+              </div>
+              <div className="p-4 sm:p-6 space-y-3 max-h-[380px] overflow-y-auto">
+                {expiringBatches.length === 0 ? (
+                  <p className="text-gray-400 text-base sm:text-xl font-bold text-center py-6">
+                    Walang malapit nang ma-expire na paninda.
+                  </p>
+                ) : (
+                  expiringBatches.map((b) => (
+                    <div
+                      key={`${b.itemId}-${b.batchIndex}`}
+                      className="p-3.5 sm:p-4 rounded-xl sm:rounded-2xl bg-orange-50/60 border-2 border-orange-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3"
+                    >
+                      <div>
+                        <h4 className="text-lg sm:text-2xl font-black text-gray-900">
+                          {b.name} ({b.qty} pcs)
+                        </h4>
+                        <p className="text-sm sm:text-base font-bold text-gray-600">
+                          Expiry Date: <span className="text-red-700 font-black">{b.expiryDate}</span> | Puhunan: ₱{b.cost.toFixed(2)}/pc
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 w-full sm:w-auto justify-between sm:justify-end">
+                        <span
+                          className={`px-3 py-1.5 rounded-xl font-black text-xs sm:text-base ${
+                            b.daysLeft <= 0
+                              ? 'bg-red-600 text-white'
+                              : 'bg-orange-200 text-orange-900'
+                          }`}
+                        >
+                          {b.daysLeft <= 0
+                            ? 'EXPIRED NA!'
+                            : `${b.daysLeft} araw na lang`}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveExpiredBatch(b.itemId, b.batchIndex)}
+                          className="bg-red-100 hover:bg-red-200 text-red-800 px-3 py-1.5 sm:px-4 sm:py-2 rounded-xl font-black text-xs sm:text-base flex items-center gap-1"
+                        >
+                          <Trash2 className="w-4 h-4" /> Bawas Expired
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           </div>
