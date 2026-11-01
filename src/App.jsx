@@ -258,7 +258,7 @@ const App = () => {
     }
   }, []);
 
-  const pullFromSheets = useCallback(async () => {
+const pullFromSheets = useCallback(async () => {
     if (!SCRIPT_URL) return;
     setSyncStatus('Naglo-load...');
     const flushed = await flushOfflineQueue();
@@ -273,7 +273,10 @@ const App = () => {
       if (data.utangList && Array.isArray(data.utangList)) {
         setUtangList(data.utangList);
       }
-      setSyncStatus('Naka-save sa Cloud');
+      if (data.boteData) {
+        setBoteData(data.boteData);
+      }
+      setSyncStatus('🟢');
     } catch {
       setSyncStatus('Offline (Saved sa Device)');
     }
@@ -298,7 +301,7 @@ const App = () => {
         body: JSON.stringify({ queue: fullQueue })
       });
       localStorage.removeItem('tindahan_offline_queue');
-      setSyncStatus('Naka-save sa Cloud');
+      setSyncStatus('🟢');
     } catch {
       const savedQueue = JSON.parse(localStorage.getItem('tindahan_offline_queue') || '[]');
       const updatedQueue = [...savedQueue, eventRecord];
@@ -879,10 +882,12 @@ const App = () => {
   // 🍾 BANTAY BOTE (DEPOSIT & BORROW TRACKER)
   // ==========================================
   const adjustTotalBote = (change) => {
-    setBoteData((prev) => ({
-      ...prev,
-      totalOwned: Math.max(0, (prev.totalOwned || 0) + change)
-    }));
+    const updatedBote = {
+      ...boteData,
+      totalOwned: Math.max(0, (boteData.totalOwned || 0) + change)
+    };
+    setBoteData(updatedBote);
+    syncToSheets('syncBote', { boteData: updatedBote });
   };
 
   const handleAddBorrowedBote = () => {
@@ -907,10 +912,13 @@ const App = () => {
       })
     };
 
-    setBoteData((prev) => ({
-      ...prev,
-      borrowedList: [newRecord, ...(prev.borrowedList || [])]
-    }));
+    const updatedBote = {
+      ...boteData,
+      borrowedList: [newRecord, ...(boteData.borrowedList || [])]
+    };
+
+    setBoteData(updatedBote);
+    syncToSheets('syncBote', { boteData: updatedBote });
 
     playBeep('success');
     showMessage(
@@ -925,10 +933,14 @@ const App = () => {
   };
 
   const handleReturnBote = (record) => {
-    setBoteData((prev) => ({
-      ...prev,
-      borrowedList: prev.borrowedList.filter((b) => b.id !== record.id)
-    }));
+    const updatedBote = {
+      ...boteData,
+      borrowedList: (boteData.borrowedList || []).filter((b) => b.id !== record.id)
+    };
+    
+    setBoteData(updatedBote);
+    syncToSheets('syncBote', { boteData: updatedBote });
+    
     playBeep('success');
     showMessage(
       record.deposit > 0
@@ -2471,7 +2483,7 @@ const handleSaveStock = () => {
 
                       <div className="p-3.5 sm:p-4 rounded-2xl bg-emerald-50 border-2 border-emerald-200">
                         <span className="text-xs sm:text-sm font-black text-emerald-800">
-                          NASA TINDAHAN NGAYON (LAMAN + BASYO)
+                          NASA TINDAHAN NGAYON
                         </span>
                         <div className="text-2xl sm:text-3xl font-black text-emerald-700 mt-2">
                           {inStoreCount} pcs
