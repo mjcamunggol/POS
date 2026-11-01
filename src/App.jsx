@@ -20,7 +20,8 @@ import {
   Printer,
   Trash2,
   Camera,
-  CameraOff
+  CameraOff,
+  Heart
 } from 'lucide-react';
 
 // ==========================================
@@ -791,6 +792,39 @@ const pullFromSheets = useCallback(async () => {
     }
 
     playBeep('success');
+    setCart([]);
+    setCashTendered('');
+    setUtangCustomer('');
+    setShowUtangInput(false);
+  };
+
+  const handleBayadPagmamahal = () => {
+    if (cart.length === 0) return;
+
+    const { updatedInventory, totalCost, priceDropAlerts } = deductCartFromInventory();
+    const itemsSummary = cart.map((i) => `${i.cartQty}x ${i.name}`).join(', ');
+
+    setInventory(updatedInventory);
+    playBeep('success');
+
+    syncToSheets('recordFamilyUse', {
+      itemsSummary,
+      totalCost,
+      inventory: updatedInventory
+    });
+
+    if (priceDropAlerts.length > 0) {
+      showMessage(
+        `❤️ Bayad Pagmamahal! Binawas sa stock. Bumaba na ang presyo ng: ${priceDropAlerts.join(', ')}.`,
+        'success'
+      );
+    } else {
+      showMessage(
+        `❤️ Bayad Pagmamahal! Binawas na sa stock (${itemsSummary}).`,
+        'success'
+      );
+    }
+
     setCart([]);
     setCashTendered('');
     setUtangCustomer('');
@@ -1862,12 +1896,25 @@ const handleSaveStock = () => {
                   </button>
 
                   {cart.length > 0 && !showUtangInput && (
-                    <button
-                      onClick={() => setShowUtangInput(true)}
-                      className="w-full bg-amber-100 text-amber-900 text-base sm:text-xl font-black py-3 rounded-xl sm:rounded-2xl border-2 border-amber-300 hover:bg-amber-200 flex justify-center items-center gap-2"
-                    >
-                      <BookOpen className="w-5 h-5 sm:w-6 sm:h-6" /> Ilista muna sa Utang
-                    </button>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowUtangInput(true)}
+                        className="w-full bg-amber-100 text-amber-900 text-sm sm:text-base font-black py-3 px-3 rounded-xl sm:rounded-2xl border-2 border-amber-300 hover:bg-amber-200 flex justify-center items-center gap-1.5"
+                      >
+                        <BookOpen className="w-5 h-5 shrink-0" />
+                        <span>Ilista sa Utang</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleBayadPagmamahal}
+                        className="w-full bg-pink-100 text-pink-900 text-sm sm:text-base font-black py-3 px-3 rounded-xl sm:rounded-2xl border-2 border-pink-300 hover:bg-pink-200 flex justify-center items-center gap-1.5 active:scale-95 transition"
+                      >
+                        <Heart className="w-5 h-5 text-pink-600 fill-pink-600 shrink-0" />
+                        <span>Bayad Pagmamahal</span>
+                      </button>
+                    </div>
                   )}
 
                   {showUtangInput && (
