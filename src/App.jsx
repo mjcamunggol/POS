@@ -21,7 +21,8 @@ import {
   Trash2,
   Camera,
   CameraOff,
-  Heart
+  Heart,
+  Star
 } from 'lucide-react';
 
 // ==========================================
@@ -34,6 +35,23 @@ const createItemId = () => Date.now() + Math.floor(Math.random() * 1000);
 // ==========================================
 // 🧠 SMART PRICE-PROTECTION ENGINE (FIFO)
 // ==========================================
+const normalizeExpiryMMYY = (raw) => {
+  if (!raw) return '';
+  const str = String(raw).trim();
+  // Kung YYYY-MM-DD o YYYY-MM ang lumang nakasave, gawing MM/YY
+  const isoMatch = str.match(/^(\d{4})-(\d{2})/);
+  if (isoMatch) {
+    return `${isoMatch[2]}/${isoMatch[1].slice(2)}`;
+  }
+  return str;
+};
+
+const expiryToSortKey = (mmyy) => {
+  const match = String(mmyy || '').match(/^(\d{2})\/(\d{2})$/);
+  if (!match) return '9999-99';
+  return `20${match[2]}-${match[1]}`;
+};
+
 const normalizeItem = (item) => {
   const validBatches = (item.batches || [])
     .filter((b) => Number(b.qty) > 0)
@@ -41,11 +59,12 @@ const normalizeItem = (item) => {
       qty: Number(b.qty),
       cost: Number(b.cost),
       price: Number(b.price),
-      expiryDate: b.expiryDate || ''
+      expiryDate: normalizeExpiryMMYY(b.expiryDate)
     }))
-    // Unahin ibenta ang batch na may pinakamalapit na expiration date (FEFO)
     .sort((a, b) => {
-      if (a.expiryDate && b.expiryDate) return a.expiryDate.localeCompare(b.expiryDate);
+      if (a.expiryDate && b.expiryDate) {
+        return expiryToSortKey(a.expiryDate).localeCompare(expiryToSortKey(b.expiryDate));
+      }
       if (a.expiryDate) return -1;
       if (b.expiryDate) return 1;
       return 0;
@@ -56,6 +75,7 @@ const normalizeItem = (item) => {
   if (validBatches.length === 0) {
     return {
       ...item,
+      isFavorite: Boolean(item.isFavorite),
       batches: [],
       qty: 0,
       cost: Number(item.cost) || 0,
@@ -70,6 +90,7 @@ const normalizeItem = (item) => {
 
   return {
     ...item,
+    isFavorite: Boolean(item.isFavorite),
     batches: validBatches,
     qty: totalQty,
     cost: currentCost,
@@ -166,9 +187,11 @@ const App = () => {
     name: '',
     qty: '',
     packCost: '',
+    unitCost: '',
     targetProfit: '',
     targetPrice: '',
-    expiryDate: ''
+    expiryDate: '',
+    isFavorite: false
   });
 
   const [message, setMessage] = useState(null);
@@ -366,8 +389,11 @@ const pullFromSheets = useCallback(async () => {
             name: '',
             qty: '',
             packCost: '',
+            unitCost: '',
             targetProfit: '',
-            targetPrice: ''
+            targetPrice: '',
+            expiryDate: '',
+            isFavorite: false
           });
           setSearchQuery('');
           showMessage(
@@ -381,11 +407,12 @@ const pullFromSheets = useCallback(async () => {
           ...prev,
           barcode,
           name: scannedItem ? scannedItem.name : prev.name,
-          targetPrice: scannedItem ? scannedItem.price.toFixed(2) : prev.targetPrice
+          targetPrice: scannedItem ? scannedItem.price.toFixed(2) : prev.targetPrice,
+          isFavorite: scannedItem ? Boolean(scannedItem.isFavorite) : prev.isFavorite
         }));
         showMessage(
           scannedItem
-            ? `Nahanap: ${scannedItem.name} (Presyo: ₱${scannedItem.price.toFixed(2)})`
+            ? `Nahanap: ${scannedItem.name} | Dating Puhunan: ₱${scannedItem.cost.toFixed(2)}/pc | Benta: ₱${scannedItem.price.toFixed(2)}`
             : `Barcode ${barcode} nailagay na!`,
           'success'
         );
@@ -393,6 +420,15 @@ const pullFromSheets = useCallback(async () => {
     },
     [activeTab, inventory, addToCart, playBeep, showMessage]
   );
+
+  // ⭐ 
+  const toggleFavorite = (itemId) => {
+    const updatedInv = inventory.map((item) =>
+      item.id === itemId ? { ...item, isFavorite: !item.isFavorite } : item
+    );
+    setInventory(updatedInv);
+    syncToSheets('syncInventory', { inventory: updatedInv });
+  };
 
   // Keep latest scan handler in a ref so the camera loop never uses stale inventory/cart state
   useEffect(() => {
@@ -988,14 +1024,70 @@ const pullFromSheets = useCallback(async () => {
   // 📦 TAB 2: DAGDAG STOCK & TUBO CALCULATOR
   // ==========================================
   const unitCostPreview =
-    newStock.packCost && newStock.qty && parseInt(newStock.qty, 10) > 0
+    parseFloat(newStock.unitCost) > 0
+      ? parseFloat(newStock.unitCost)
+      : newStock.packCost && newStock.qty && parseInt(newStock.qty, 10) > 0
       ? parseFloat(newStock.packCost) / parseInt(newStock.qty, 10)
       : 0;
+
+  // Auto-compute kapag binago ang Ilang Piraso, Puhunan Pack, o Puhunan/pc
+  const handleQtyChange = (val) => {
+    const qtyNum = parseInt(val, 10);
+    setNewStock((prev) => {
+      let nextUnit = prev.unitCost;
+      let nextPack = prev.packCost;
+      if (qtyNum > 0 && parseFloat(prev.packCost) > 0) {
+        nextUnit = (parseFloat(prev.packCost) / qtyNum).toFixed(2);
+      } else if (qtyNum > 0 && parseFloat(prev.unitCost) > 0) {
+        nextPack = (parseFloat(prev.unitCost) * qtyNum).toFixed(2);
+      }
+      return { ...prev, qty: val, unitCost: nextUnit, packCost: nextPack };
+    });
+  };
+
+  const handlePackCostChange = (val) => {
+    const packNum = parseFloat(val);
+    const qtyNum = parseInt(newStock.qty, 10);
+    setNewStock((prev) => ({
+      ...prev,
+      packCost: val,
+      unitCost:
+        qtyNum > 0 && !isNaN(packNum) && packNum > 0
+          ? (packNum / qtyNum).toFixed(2)
+          : prev.unitCost
+    }));
+  };
+
+  const handleUnitCostChange = (val) => {
+    const unitNum = parseFloat(val);
+    const qtyNum = parseInt(newStock.qty, 10);
+    setNewStock((prev) => ({
+      ...prev,
+      unitCost: val,
+      packCost:
+        qtyNum > 0 && !isNaN(unitNum) && unitNum > 0
+          ? (unitNum * qtyNum).toFixed(2)
+          : ''
+    }));
+  };
+
+  // Auto-format sa MM/YY habang nagta-type (hal. "1126" -> "11/26")
+  const handleExpiryMMYYChange = (rawVal) => {
+    const digits = rawVal.replace(/\D/g, '').slice(0, 4);
+    let formatted = digits;
+    if (digits.length >= 3) {
+      let mm = parseInt(digits.slice(0, 2), 10);
+      if (mm > 12) mm = 12;
+      if (mm < 1) mm = 1;
+      formatted = `${String(mm).padStart(2, '0')}/${digits.slice(2)}`;
+    }
+    setNewStock((prev) => ({ ...prev, expiryDate: formatted }));
+  };
 
   const applyQuickProfit = (amount, mode = 'peso') => {
     if (unitCostPreview <= 0) {
       playBeep('error');
-      return showMessage('Ilagay muna ang "Ilang Piraso" at "Puhunan sa Pack".', 'error');
+      return showMessage('Ilagay muna ang Puhunan (sa Pack o Kada Piraso).', 'error');
     }
     const computed =
       mode === 'peso'
@@ -1014,17 +1106,21 @@ const pullFromSheets = useCallback(async () => {
     setNewStock((prev) => ({ ...prev, targetPrice: Math.ceil(current).toFixed(2) }));
   };
 
-const handleSaveStock = () => {
+  const handleSaveStock = () => {
     const qtyNum = parseInt(newStock.qty, 10);
-    const packCostNum = parseFloat(newStock.packCost);
     const newPrice = parseFloat(newStock.targetPrice);
+    const finalUnitCost = unitCostPreview;
+    const finalPackCost =
+      parseFloat(newStock.packCost) > 0
+        ? parseFloat(newStock.packCost)
+        : finalUnitCost * (qtyNum || 0);
 
     if (
       !newStock.name.trim() ||
       !qtyNum ||
       qtyNum <= 0 ||
-      isNaN(packCostNum) ||
-      packCostNum <= 0 ||
+      isNaN(finalUnitCost) ||
+      finalUnitCost <= 0 ||
       isNaN(newPrice) ||
       newPrice <= 0
     ) {
@@ -1032,7 +1128,11 @@ const handleSaveStock = () => {
       return showMessage('Pakikumpleto ang Pangalan, Piraso, Puhunan, at Presyo.', 'error');
     }
 
-    const unitCost = packCostNum / qtyNum;
+    if (newStock.expiryDate && !/^\d{2}\/\d{2}$/.test(newStock.expiryDate.trim())) {
+      playBeep('error');
+      return showMessage('Gamitin ang MM/YY na format sa Expiration (hal. 12/26).', 'error');
+    }
+
     const cleanBarcode = newStock.barcode.trim();
     const existingIndex = inventory.findIndex(
       (i) =>
@@ -1063,14 +1163,15 @@ const handleSaveStock = () => {
 
       updatedBatches.push({
         qty: qtyNum,
-        cost: unitCost,
+        cost: finalUnitCost,
         price: newPrice,
-        expiryDate: newStock.expiryDate || ''
+        expiryDate: newStock.expiryDate.trim() || ''
       });
 
       updatedInv[existingIndex] = normalizeItem({
         ...existing,
         barcode: cleanBarcode || existing.barcode,
+        isFavorite: Boolean(newStock.isFavorite),
         batches: updatedBatches
       });
     } else {
@@ -1079,12 +1180,13 @@ const handleSaveStock = () => {
         id,
         barcode: cleanBarcode || `ITEM-${id}`,
         name: newStock.name.trim(),
+        isFavorite: Boolean(newStock.isFavorite),
         batches: [
           {
             qty: qtyNum,
-            cost: unitCost,
+            cost: finalUnitCost,
             price: newPrice,
-            expiryDate: newStock.expiryDate || ''
+            expiryDate: newStock.expiryDate.trim() || ''
           }
         ]
       });
@@ -1094,16 +1196,21 @@ const handleSaveStock = () => {
 
     setInventory(updatedInv);
     playBeep('success');
-    syncToSheets('addStock', { item: newStock, inventory: updatedInv });
-    
+    syncToSheets('addStock', {
+      item: { ...newStock, packCost: finalPackCost.toFixed(2) },
+      inventory: updatedInv
+    });
+
     setNewStock({
       barcode: '',
       name: '',
       qty: '',
       packCost: '',
+      unitCost: '',
       targetProfit: '',
       targetPrice: '',
-      expiryDate: ''
+      expiryDate: '',
+      isFavorite: false
     });
   };
 
@@ -1142,6 +1249,25 @@ const handleSaveStock = () => {
     );
   };
 
+  const handleDeleteInventoryItem = (item) => {
+    if (
+      !window.confirm(
+        `Sigurado ka bang buburahin na sa listahan ng paninda ang "${item.name}"?`
+      )
+    ) {
+      return;
+    }
+
+    const updatedInv = inventory.filter((i) => i.id !== item.id);
+    setInventory(updatedInv);
+    playBeep('success');
+    syncToSheets('deleteItem', {
+      deletedName: item.name,
+      inventory: updatedInv
+    });
+    showMessage(`Binura na sa inventory ang "${item.name}".`, 'success');
+  };
+
   // ==========================================
   // 🎨 COMPUTED VALUES FOR RENDER
   // ==========================================
@@ -1156,20 +1282,29 @@ const handleSaveStock = () => {
       item.barcode === searchQuery.trim()
   );
 
-  const noBarcodeItems = inventory.filter(
-    (i) => !i.barcode || i.barcode.startsWith('ITEM-') || i.barcode.startsWith('N/A-')
-  );
+  // ⭐ Mga naka-Favorite 
+  const noBarcodeItems = inventory.filter((i) => i.isFavorite);
 
-  const lowStockItems = inventory.filter((item) => item.qty <= 5);
+  // Out of Stock
+  const lowStockItems = inventory.filter((item) => item.qty === 0);
+
+  // 📅 MM/YY Expiration Checker (Mag-e-expire ngayong buwan, susunod na buwan, o expired na)
   const expiringBatches = inventory.flatMap((item) =>
     (item.batches || [])
       .map((batch, batchIndex) => {
         if (!batch.expiryDate) return null;
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const exp = new Date(batch.expiryDate + 'T00:00:00');
-        const daysLeft = Math.ceil((exp - today) / (1000 * 60 * 60 * 24));
-        if (daysLeft > 14) return null; // Ipakita lang kung 14 days o mas mababa na lang
+        const match = String(batch.expiryDate).match(/^(\d{2})\/(\d{2})$/);
+        if (!match) return null;
+
+        const expMonth = parseInt(match[1], 10);
+        const expYear = 2000 + parseInt(match[2], 10);
+        const now = new Date();
+        const currentMonth = now.getMonth() + 1;
+        const currentYear = now.getFullYear();
+
+        const monthsLeft = (expYear - currentYear) * 12 + (expMonth - currentMonth);
+        if (monthsLeft > 1) return null; // Ipakita lang kung 1 buwan o mas mababa na lang
+
         return {
           itemId: item.id,
           name: item.name,
@@ -1178,7 +1313,7 @@ const handleSaveStock = () => {
           cost: batch.cost,
           price: batch.price,
           expiryDate: batch.expiryDate,
-          daysLeft
+          daysLeft: monthsLeft // <= 0 means ngayong buwan o lampas na
         };
       })
       .filter(Boolean)
@@ -1374,9 +1509,23 @@ const handleSaveStock = () => {
                         className="p-4 sm:p-6 border-b-2 border-gray-100 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 sm:gap-4 bg-white hover:bg-emerald-50"
                       >
                         <div>
-                          <h3 className="text-xl sm:text-3xl font-black text-gray-800">
-                            {item.name}
-                          </h3>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => toggleFavorite(item.id)}
+                              title="Ilagay o alisin sa Tingi / Paborito"
+                              className={`p-1.5 rounded-xl border-2 transition ${
+                                item.isFavorite
+                                  ? 'bg-amber-400 text-white border-amber-500'
+                                  : 'bg-gray-100 text-gray-400 border-gray-200 hover:text-amber-500'
+                              }`}
+                            >
+                              <Star className="w-5 h-5 fill-current" />
+                            </button>
+                            <h3 className="text-xl sm:text-3xl font-black text-gray-800">
+                              {item.name}
+                            </h3>
+                          </div>
                           <p className="text-gray-500 text-sm sm:text-xl mt-1 font-bold flex flex-wrap items-center gap-1.5">
                             <Package className="w-4 h-4 sm:w-6 sm:h-6" /> Stock: {item.qty} pcs
                             {item.batches && item.batches.length > 1 && (
@@ -1983,11 +2132,11 @@ const handleSaveStock = () => {
 
             <div className="p-4 sm:p-8 grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-10">
               {/* LEFT: ITEM DETAILS */}
-              <div className="space-y-4 sm:space-y-6">
+              <div className="space-y-4 sm:space-y-5">
                 <div>
                   <div className="flex justify-between items-center mb-1.5 sm:mb-2">
                     <label className="block text-gray-800 font-black text-base sm:text-2xl">
-                      1. Barcode (I-scan o Blanko):
+                      Barcode (I-scan o Blanko):
                     </label>
                     <button
                       type="button"
@@ -1999,7 +2148,7 @@ const handleSaveStock = () => {
                       }`}
                     >
                       {cameraOpen ? <CameraOff className="w-4 h-4" /> : <Camera className="w-4 h-4" />}
-                      <span>{cameraOpen ? 'Isara Camera' : ''}</span>
+                      <span>{cameraOpen ? '' : ''}</span>
                     </button>
                   </div>
 
@@ -2027,82 +2176,193 @@ const handleSaveStock = () => {
                         ...prev,
                         barcode: val,
                         name: existing ? existing.name : prev.name,
-                        targetPrice: existing ? existing.price.toFixed(2) : prev.targetPrice
+                        targetPrice: existing ? existing.price.toFixed(2) : prev.targetPrice,
+                        isFavorite: existing ? Boolean(existing.isFavorite) : prev.isFavorite
                       }));
                     }}
-                    className="w-full p-3.5 sm:p-5 border-2 sm:border-4 border-gray-300 rounded-xl sm:rounded-2xl text-lg sm:text-2xl font-bold focus:border-emerald-500"
+                    className="w-full p-3.5 sm:p-4 border-2 sm:border-4 border-gray-300 rounded-xl sm:rounded-2xl text-lg sm:text-2xl font-bold focus:border-emerald-500"
                     placeholder="I-scan o iwanang blanko..."
                   />
                 </div>
 
                 <div>
                   <label className="block text-gray-800 font-black mb-1.5 sm:mb-2 text-base sm:text-2xl">
-                    2. Pangalan ng Paninda:
+                    Pangalan ng Paninda:
                   </label>
                   <input
                     type="text"
                     value={newStock.name}
-                    onChange={(e) => setNewStock({ ...newStock, name: e.target.value })}
-                    className="w-full p-3.5 sm:p-5 border-2 sm:border-4 border-gray-300 rounded-xl sm:rounded-2xl text-lg sm:text-2xl font-bold focus:border-emerald-500"
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      const existing = inventory.find(
+                        (i) => i.name.toLowerCase() === val.trim().toLowerCase()
+                      );
+                      setNewStock((prev) => ({
+                        ...prev,
+                        name: val,
+                        targetPrice:
+                          existing && !prev.targetPrice
+                            ? existing.price.toFixed(2)
+                            : prev.targetPrice,
+                        isFavorite: existing ? Boolean(existing.isFavorite) : prev.isFavorite
+                      }));
+                    }}
+                    className="w-full p-3.5 sm:p-4 border-2 sm:border-4 border-gray-300 rounded-xl sm:rounded-2xl text-lg sm:text-2xl font-bold focus:border-emerald-500"
                     placeholder="Hal. Lucky Me, Yelo, Itlog..."
                   />
+
+                  {/* PAST RECORDED COST & PRICE COMPARISON BOX */}
                   {matchedExistingStock && (
-                    <p className="mt-2 text-emerald-700 font-black text-sm sm:text-lg bg-emerald-50 p-2.5 sm:p-3 rounded-xl border border-emerald-200">
-                      📌 Naka-rekord na: May {matchedExistingStock.qty} pcs pa (Presyo: ₱
-                      {matchedExistingStock.price.toFixed(2)})
-                    </p>
+                    <div className="mt-2.5 bg-emerald-50 p-3 sm:p-4 rounded-2xl border-2 border-emerald-300 space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span className="text-emerald-900 font-black text-sm sm:text-base">
+                          📌 Naka-rekord na ({matchedExistingStock.qty} pcs natitira):
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleUnitCostChange(matchedExistingStock.cost.toFixed(2))
+                          }
+                          className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 py-1 rounded-lg font-black"
+                        >
+                          Gamitin Dating Puhunan
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 pt-1">
+                        <div className="bg-white p-2.5 rounded-xl border border-emerald-200">
+                          <span className="text-xs font-bold text-gray-500 block">
+                            DATING PUHUNAN / PC:
+                          </span>
+                          <span className="text-lg sm:text-2xl font-black text-gray-800">
+                            ₱{matchedExistingStock.cost.toFixed(2)}
+                          </span>
+                        </div>
+                        <div className="bg-white p-2.5 rounded-xl border border-emerald-200">
+                          <span className="text-xs font-bold text-gray-500 block">
+                            DATING BENTA / PC:
+                          </span>
+                          <span className="text-lg sm:text-2xl font-black text-emerald-700">
+                            ₱{matchedExistingStock.price.toFixed(2)}
+                          </span>
+                        </div>
+                      </div>
+                      {unitCostPreview > 0 && (
+                        <p
+                          className={`text-xs sm:text-sm font-black px-2.5 py-1.5 rounded-lg ${
+                            unitCostPreview > matchedExistingStock.cost
+                              ? 'bg-red-100 text-red-800'
+                              : unitCostPreview < matchedExistingStock.cost
+                              ? 'bg-blue-100 text-blue-800'
+                              : 'bg-gray-100 text-gray-700'
+                          }`}
+                        >
+                          {unitCostPreview > matchedExistingStock.cost
+                            ? `⚠️ Tumaas ang puhunan ng +₱${(
+                                unitCostPreview - matchedExistingStock.cost
+                              ).toFixed(2)} kada piraso!`
+                            : unitCostPreview < matchedExistingStock.cost
+                            ? `📉 Mas mura ang bagong puhunan ng -₱${(
+                                matchedExistingStock.cost - unitCostPreview
+                              ).toFixed(2)} kada piraso!`
+                            : '✅ Pareho lang sa dating puhunan kada piraso.'}
+                        </p>
+                      )}
+                    </div>
                   )}
                 </div>
 
-                <div className="grid grid-cols-2 gap-3 sm:gap-6">
+                {/* QTY + PACK COST OR PER PIECE COST */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
-                    <label className="block text-gray-800 font-black mb-1.5 sm:mb-2 text-base sm:text-2xl">
-                      3. Ilang Piraso?
+                    <label className="block text-gray-800 font-black mb-1 text-sm sm:text-lg">
+                      Ilang Piraso?
                     </label>
                     <input
                       type="number"
                       value={newStock.qty}
-                      onChange={(e) => setNewStock({ ...newStock, qty: e.target.value })}
-                      className="w-full p-3.5 sm:p-5 border-2 sm:border-4 border-gray-300 rounded-xl sm:rounded-2xl text-xl sm:text-3xl font-black text-center focus:border-emerald-500"
-                      placeholder="Hal. 24"
+                      onChange={(e) => handleQtyChange(e.target.value)}
+                      className="w-full p-3 sm:p-4 border-2 sm:border-4 border-gray-300 rounded-xl sm:rounded-2xl text-xl sm:text-2xl font-black text-center focus:border-emerald-500"
+                      placeholder="-"
                     />
                   </div>
                   <div>
-                    <label className="block text-gray-800 font-black mb-1.5 sm:mb-2 text-base sm:text-2xl">
-                      4. Puhunan Pack:
+                    <label className="block text-gray-800 font-black mb-1 text-sm sm:text-lg">
+                      Pack Price:
                     </label>
                     <input
                       type="number"
                       value={newStock.packCost}
-                      onChange={(e) => setNewStock({ ...newStock, packCost: e.target.value })}
-                      className="w-full p-3.5 sm:p-5 border-2 sm:border-4 border-gray-300 rounded-xl sm:rounded-2xl text-xl sm:text-3xl font-black text-center focus:border-emerald-500"
-                      placeholder="Hal. 300"
+                      onChange={(e) => handlePackCostChange(e.target.value)}
+                      className="w-full p-3 sm:p-4 border-2 sm:border-4 border-gray-300 rounded-xl sm:rounded-2xl text-xl sm:text-2xl font-black text-center focus:border-emerald-500"
+                      placeholder="-"
                     />
                   </div>
                   <div>
-                  <label className="block text-gray-800 font-black mb-1.5 sm:mb-2 text-base sm:text-2xl">
-                    📅 Expiration Date (Optional — kung pagkain/gamot):
-                  </label>
-                  <div className="flex gap-2">
+                    <label className="block text-emerald-800 font-black mb-1 text-sm sm:text-lg">
+                      Price/pc:
+                    </label>
                     <input
-                      type="date"
-                      value={newStock.expiryDate || ''}
-                      onChange={(e) =>
-                        setNewStock({ ...newStock, expiryDate: e.target.value })
-                      }
-                      className="flex-1 p-3.5 sm:p-4 border-2 sm:border-4 border-gray-300 rounded-xl sm:rounded-2xl text-lg sm:text-2xl font-bold focus:border-emerald-500 bg-white"
+                      type="number"
+                      value={newStock.unitCost}
+                      onChange={(e) => handleUnitCostChange(e.target.value)}
+                      className="w-full p-3 sm:p-4 border-2 sm:border-4 border-emerald-400 bg-emerald-50/40 rounded-xl sm:rounded-2xl text-xl sm:text-2xl font-black text-center focus:border-emerald-600"
+                      placeholder="-"
                     />
-                    {newStock.expiryDate && (
-                      <button
-                        type="button"
-                        onClick={() => setNewStock({ ...newStock, expiryDate: '' })}
-                        className="px-4 bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold rounded-xl text-sm sm:text-base"
-                      >
-                        Burahin
-                      </button>
-                    )}
                   </div>
                 </div>
+
+                {/* MM/YY EXPIRATION DATE & FAVORITE STAR TOGGLE */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-gray-800 font-black mb-1 text-sm sm:text-lg">
+                      📅 Expiration (Optional):
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={5}
+                        value={newStock.expiryDate || ''}
+                        onChange={(e) => handleExpiryMMYYChange(e.target.value)}
+                        placeholder="MM/YY"
+                        className="w-full p-3 border-2 sm:border-4 border-gray-300 rounded-xl sm:rounded-2xl text-lg sm:text-xl font-black text-center focus:border-emerald-500 bg-white"
+                      />
+                      {newStock.expiryDate && (
+                        <button
+                          type="button"
+                          onClick={() => setNewStock({ ...newStock, expiryDate: '' })}
+                          className="px-3 bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold rounded-xl text-xs sm:text-sm"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-end">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setNewStock((prev) => ({ ...prev, isFavorite: !prev.isFavorite }))
+                      }
+                      className={`w-full p-3 sm:p-3.5 rounded-xl sm:rounded-2xl border-2 sm:border-4 font-black text-sm sm:text-base flex items-center justify-center gap-2 transition ${
+                        newStock.isFavorite
+                          ? 'bg-amber-400 text-amber-950 border-amber-600 shadow-sm'
+                          : 'bg-gray-50 text-gray-600 border-gray-300 hover:bg-amber-50'
+                      }`}
+                    >
+                      <Star
+                        className={`w-5 h-5 ${
+                          newStock.isFavorite ? 'fill-amber-950' : ''
+                        }`}
+                      />
+                      <span>
+                        {newStock.isFavorite
+                          ? '⭐'
+                          : 'Tingi / Paborito'}
+                      </span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -2418,10 +2678,10 @@ const handleSaveStock = () => {
               <div className="bg-white rounded-2xl sm:rounded-3xl shadow-xl border-2 sm:border-4 border-red-100 overflow-hidden">
                 <div className="bg-red-50 p-4 sm:p-6 border-b-2 border-red-200">
                   <h3 className="text-lg sm:text-2xl font-black text-red-900 flex items-center gap-2">
-                    <AlertTriangle className="w-6 h-6 sm:w-7 sm:h-7" /> Paubos na Stock ({lowStockItems.length})
+                    <AlertTriangle className="w-6 h-6 sm:w-7 sm:h-7" /> Ubos na Stock ({lowStockItems.length})
                   </h3>
                   <p className="text-red-700 font-semibold text-xs sm:text-base mt-0.5">
-                    Mga panindang 5 piraso o mas mababa na lang ang natitira:
+                    Mga panindang wala nang stock:
                   </p>
                 </div>
                 <div className="p-4 sm:p-6 space-y-2.5 sm:space-y-3 max-h-[420px] overflow-y-auto">
@@ -2443,15 +2703,14 @@ const handleSaveStock = () => {
                             Presyo: ₱{item.price.toFixed(2)}
                           </p>
                         </div>
-                        <span
-                          className={`px-3 py-1.5 sm:px-4 sm:py-2 rounded-xl font-black text-sm sm:text-xl shrink-0 ${
-                            item.qty === 0
-                              ? 'bg-red-600 text-white'
-                              : 'bg-amber-200 text-amber-900'
-                          }`}
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteInventoryItem(item)}
+                          className="bg-red-600 hover:bg-red-700 active:scale-95 transition text-white px-3.5 py-2 sm:px-4 sm:py-2.5 rounded-xl font-black text-xs sm:text-base flex items-center gap-1.5 shrink-0 shadow-sm"
                         >
-                          {item.qty === 0 ? 'UBOS NA' : `${item.qty} pcs`}
-                        </span>
+                          <Trash2 className="w-4 h-4 sm:w-5 sm:h-5" />
+                          <span>Burahin</span>
+                        </button>
                       </div>
                     ))
                   )}
@@ -2711,7 +2970,7 @@ const handleSaveStock = () => {
                   Malapit nang Ma-Expire / Expired ({expiringBatches.length})
                 </h3>
                 <p className="text-orange-800 font-semibold text-xs sm:text-base mt-0.5">
-                  Mga panindang mag-e-expire sa loob ng 14 araw (Ibenta agad o alisin kung sira na):
+                  Mga panindang mag-e-expire (Ibenta agad o alisin kung sira na):
                 </p>
               </div>
               <div className="p-4 sm:p-6 space-y-3 max-h-[380px] overflow-y-auto">
@@ -2736,14 +2995,18 @@ const handleSaveStock = () => {
                       <div className="flex items-center gap-2 w-full sm:w-auto justify-between sm:justify-end">
                         <span
                           className={`px-3 py-1.5 rounded-xl font-black text-xs sm:text-base ${
-                            b.daysLeft <= 0
+                            b.daysLeft < 0
                               ? 'bg-red-600 text-white'
+                              : b.daysLeft === 0
+                              ? 'bg-red-100 text-red-800 border border-red-300'
                               : 'bg-orange-200 text-orange-900'
                           }`}
                         >
-                          {b.daysLeft <= 0
+                          {b.daysLeft < 0
                             ? 'EXPIRED NA!'
-                            : `${b.daysLeft} araw na lang`}
+                            : b.daysLeft === 0
+                            ? 'Ngayong buwan na!'
+                            : `${b.daysLeft} buwan na lang`}
                         </span>
                         <button
                           type="button"
