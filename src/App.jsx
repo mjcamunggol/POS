@@ -123,6 +123,23 @@ const App = () => {
     return saved ? JSON.parse(saved) : [];
   });
 
+  // Bantay Bote (Softdrinks / Beer Glass Bottle Tracker)
+  const [boteData, setBoteData] = useState(() => {
+    const saved = localStorage.getItem('tindahan_bote');
+    return saved
+      ? JSON.parse(saved)
+      : { totalOwned: 48, borrowedList: [] }; // 48 pcs = 2 cases default
+  });
+  const [boteCustomer, setBoteCustomer] = useState('');
+  const [boteBrand, setBoteBrand] = useState('Softdrinks (Mismo/Kasalo)');
+  const [boteQty, setBoteQty] = useState('1');
+  const [boteDeposit, setBoteDeposit] = useState('10');
+  const [showBoteForm, setShowBoteForm] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem('tindahan_bote', JSON.stringify(boteData));
+  }, [boteData]);
+
   // Cart & Checkout States
   const [cart, setCart] = useState([]);
   const [cashTendered, setCashTendered] = useState('');
@@ -856,6 +873,69 @@ const App = () => {
     );
     setActiveHulogId(null);
     setHulogAmount('');
+  };
+
+  // ==========================================
+  // 🍾 BANTAY BOTE (DEPOSIT & BORROW TRACKER)
+  // ==========================================
+  const adjustTotalBote = (change) => {
+    setBoteData((prev) => ({
+      ...prev,
+      totalOwned: Math.max(0, (prev.totalOwned || 0) + change)
+    }));
+  };
+
+  const handleAddBorrowedBote = () => {
+    const qty = parseInt(boteQty, 10) || 1;
+    const deposit = parseFloat(boteDeposit) || 0;
+    if (!boteCustomer.trim()) {
+      playBeep('error');
+      return showMessage('Ilagay ang pangalan ng kumuha ng bote.', 'error');
+    }
+
+    const newRecord = {
+      id: createItemId(),
+      customer: boteCustomer.trim(),
+      brand: boteBrand,
+      qty: qty,
+      deposit: deposit,
+      date: new Date().toLocaleDateString('en-PH', {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      })
+    };
+
+    setBoteData((prev) => ({
+      ...prev,
+      borrowedList: [newRecord, ...(prev.borrowedList || [])]
+    }));
+
+    playBeep('success');
+    showMessage(
+      deposit > 0
+        ? `Nailista: ${qty}x bote kay ${newRecord.customer} (May Deposito: ₱${deposit.toFixed(2)})`
+        : `Nailista: ${qty}x bote kay ${newRecord.customer} (Walang Deposito)`,
+      'success'
+    );
+    setBoteCustomer('');
+    setBoteQty('1');
+    setShowBoteForm(false);
+  };
+
+  const handleReturnBote = (record) => {
+    setBoteData((prev) => ({
+      ...prev,
+      borrowedList: prev.borrowedList.filter((b) => b.id !== record.id)
+    }));
+    playBeep('success');
+    showMessage(
+      record.deposit > 0
+        ? `Sinauli na ni ${record.customer} ang ${record.qty}x bote! Ibalik ang ₱${record.deposit.toFixed(2)} na deposito.`
+        : `Sinauli na ni ${record.customer} ang ${record.qty}x bote!`,
+      'success'
+    );
   };
 
   // ==========================================
@@ -2147,15 +2227,18 @@ const handleSaveStock = () => {
               </div>
             )}
 
+            
+
             {/* UTANG & PAUBOS NA STOCK */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 sm:gap-8">
+              {/* LISTA NG UTANG (FIXED MOBILE VIEW) */}
               <div className="bg-white rounded-2xl sm:rounded-3xl shadow-xl border-2 sm:border-4 border-amber-100 overflow-hidden">
                 <div className="bg-amber-50 p-4 sm:p-6 border-b-2 border-amber-200">
                   <h3 className="text-lg sm:text-2xl font-black text-amber-900 flex items-center gap-2">
                     <BookOpen className="w-6 h-6 sm:w-7 sm:h-7" /> Lista ng Utang ({utangList.length})
                   </h3>
                 </div>
-                <div className="p-4 sm:p-6 space-y-3 sm:space-y-4 max-h-[420px] overflow-y-auto">
+                <div className="p-3 sm:p-6 space-y-3 sm:space-y-4 max-h-[460px] overflow-y-auto">
                   {utangList.length === 0 ? (
                     <p className="text-gray-400 text-base sm:text-xl font-bold text-center py-6 sm:py-8">
                       Walang nakalistang utang.
@@ -2164,21 +2247,21 @@ const handleSaveStock = () => {
                     utangList.map((u) => (
                       <div
                         key={u.id}
-                        className="p-3.5 sm:p-4 rounded-xl sm:rounded-2xl bg-amber-50/60 border-2 border-amber-200 space-y-3"
+                        className="p-3.5 sm:p-4 rounded-2xl bg-amber-50/60 border-2 border-amber-200 space-y-3"
                       >
-                        <div className="flex justify-between items-start gap-3">
-                          <div className="min-w-0">
-                            <h4 className="text-lg sm:text-2xl font-black text-gray-900 truncate">
+                        <div className="flex justify-between items-start gap-2">
+                          <div className="min-w-0 flex-1">
+                            <h4 className="text-lg sm:text-2xl font-black text-gray-900 break-words">
                               {u.customer}
                             </h4>
-                            <p className="text-gray-600 font-bold text-sm sm:text-base">
+                            <p className="text-gray-600 font-bold text-xs sm:text-base break-words mt-0.5">
                               {u.itemsSummary}
                             </p>
-                            <p className="text-gray-400 text-xs sm:text-sm font-semibold">
+                            <p className="text-gray-400 text-xs font-semibold mt-1">
                               {u.date}
                             </p>
                           </div>
-                          <div className="text-right shrink-0">
+                          <div className="text-right shrink-0 pl-2">
                             <span className="text-xs font-bold text-amber-700 block">
                               Balanse:
                             </span>
@@ -2188,8 +2271,8 @@ const handleSaveStock = () => {
                           </div>
                         </div>
 
-                        {/* ACTION BUTTONS: HULOG (PARTIAL) OR BUONG BAYAD */}
-                        <div className="flex gap-2 justify-end pt-1">
+                        {/* PANTAY NA 2-COLUMN BUTTONS SA MOBILE */}
+                        <div className="grid grid-cols-2 gap-2 pt-1">
                           <button
                             type="button"
                             onClick={() => {
@@ -2201,59 +2284,65 @@ const handleSaveStock = () => {
                                 setHulogAmount('');
                               }
                             }}
-                            className="bg-amber-200 hover:bg-amber-300 text-amber-900 px-3.5 py-2 rounded-xl font-black text-sm sm:text-base"
+                            className="w-full bg-amber-200 hover:bg-amber-300 text-amber-900 py-2.5 px-3 rounded-xl font-black text-xs sm:text-base flex items-center justify-center gap-1"
                           >
-                            💵 Hulog (Partial)
+                            <span>💵 Hulog (Partial)</span>
                           </button>
                           <button
                             type="button"
                             onClick={() => markUtangPaid(u)}
-                            className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl font-black text-sm sm:text-base"
+                            className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2.5 px-3 rounded-xl font-black text-xs sm:text-base flex items-center justify-center gap-1"
                           >
-                            ✓ Buong Bayad
+                            <span>✓ Buong Bayad</span>
                           </button>
                         </div>
 
-                        {/* COLLAPSIBLE HULOG INPUT DRAWER */}
+                        {/* MOBILE-SAFE HULOG INPUT DRAWER (WALANG OVERFLOW) */}
                         {activeHulogId === u.id && (
-                          <div className="bg-white p-3 rounded-xl border-2 border-amber-400 space-y-2.5">
-                            <label className="block text-amber-900 font-black text-sm sm:text-base">
+                          <div className="bg-white p-3 sm:p-4 rounded-xl border-2 border-amber-400 space-y-2.5">
+                            <label className="block text-amber-900 font-black text-xs sm:text-base">
                               Magkano ang ihuhulog ni {u.customer}?
                             </label>
                             <div className="flex gap-1.5 flex-wrap">
-                              {[20, 50, 100, 200, 500]
+                              {[10, 20, 50, 100, 200, 500]
                                 .filter((amt) => amt < u.amount)
                                 .map((amt) => (
                                   <button
                                     key={amt}
                                     type="button"
                                     onClick={() => setHulogAmount(String(amt))}
-                                    className="px-3 py-1 bg-amber-100 hover:bg-amber-200 text-amber-900 rounded-lg font-black text-sm border border-amber-300"
+                                    className={`px-3 py-1.5 rounded-lg font-black text-xs sm:text-sm border ${
+                                      Number(hulogAmount) === amt
+                                        ? 'bg-amber-500 text-white border-amber-600'
+                                        : 'bg-amber-100 hover:bg-amber-200 text-amber-900 border-amber-300'
+                                    }`}
                                   >
                                     ₱{amt}
                                   </button>
                                 ))}
                             </div>
-                            <div className="flex gap-2">
+
+                            <div className="flex flex-col sm:flex-row gap-2">
                               <input
                                 type="number"
                                 value={hulogAmount}
                                 onChange={(e) => setHulogAmount(e.target.value)}
-                                placeholder="Halaga (₱)..."
-                                className="flex-1 p-2.5 border-2 border-amber-300 rounded-xl font-black text-lg text-center"
+                                placeholder="Ilagay ang halaga (₱)..."
+                                className="w-full min-w-0 p-2.5 sm:p-3 border-2 border-amber-300 rounded-xl font-black text-base sm:text-lg text-center bg-gray-50 focus:bg-white focus:border-amber-500 outline-none"
                               />
                               <button
                                 type="button"
                                 onClick={() => handlePartialUtangPayment(u)}
-                                className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-xl font-black text-sm sm:text-base"
+                                className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 sm:py-3 rounded-xl font-black text-sm sm:text-base shrink-0 shadow-sm active:scale-95 transition"
                               >
-                                I-Save ang Hulog
+                                ✓ I-Save ang Hulog
                               </button>
                             </div>
+
                             {parseFloat(hulogAmount) > 0 &&
                               parseFloat(hulogAmount) < u.amount && (
-                                <p className="text-xs sm:text-sm font-bold text-gray-600">
-                                  Natitirang utang pagkatapos ng hulog:{' '}
+                                <p className="text-xs sm:text-sm font-bold text-gray-600 text-center sm:text-left">
+                                  Natitirang balanse:{' '}
                                   <span className="text-amber-800 font-black">
                                     ₱{(u.amount - parseFloat(hulogAmount)).toFixed(2)}
                                   </span>
@@ -2310,6 +2399,251 @@ const handleSaveStock = () => {
                 </div>
               </div>
             </div>
+            
+            {/* 🍾 BANTAY BOTE AT DEPOSITO (SOFTDRINKS / BEER) */}
+            {(() => {
+              const borrowedCount = (boteData.borrowedList || []).reduce(
+                (sum, b) => sum + Number(b.qty || 0),
+                0
+              );
+              const inStoreCount = Math.max(0, (boteData.totalOwned || 0) - borrowedCount);
+              const totalHeldDeposit = (boteData.borrowedList || []).reduce(
+                (sum, b) => sum + Number(b.deposit || 0),
+                0
+              );
+
+              return (
+                <div className="bg-white rounded-2xl sm:rounded-3xl shadow-xl border-2 sm:border-4 border-teal-200 overflow-hidden">
+                  <div className="bg-teal-50 p-4 sm:p-6 border-b-2 border-teal-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                    <div>
+                      <h3 className="text-lg sm:text-2xl font-black text-teal-900 flex items-center gap-2">
+                        <span>🍾 Bantay Bote</span>
+                      </h3>
+                      <p className="text-teal-700 font-semibold text-xs sm:text-base mt-0.5">
+                        Subaybayan ang kabuuang bote, hiram ng customer, at iniwang deposito:
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowBoteForm(!showBoteForm)}
+                      className="w-full sm:w-auto bg-teal-600 hover:bg-teal-700 text-white px-4 py-2.5 rounded-xl font-black text-sm sm:text-base shadow-sm"
+                    >
+                      {showBoteForm ? '✕ Isara' : '+ Maglista ng Hiram na Bote'}
+                    </button>
+                  </div>
+
+                  <div className="p-4 sm:p-6 space-y-5">
+                    {/* 3 BOTE SUMMARY CARDS */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="p-3.5 sm:p-4 rounded-2xl bg-gray-50 border-2 border-gray-200 flex flex-col justify-between">
+                        <span className="text-xs sm:text-sm font-black text-gray-500">
+                          KABUUANG BOTE NG TINDAHAN
+                        </span>
+                        <div className="flex items-center justify-between mt-2">
+                          <span className="text-2xl sm:text-3xl font-black text-gray-900">
+                            {boteData.totalOwned || 0} pcs
+                          </span>
+                          <div className="flex gap-1">
+                            <button
+                              type="button"
+                              onClick={() => adjustTotalBote(-1)}
+                              className="px-2.5 py-1 bg-gray-200 hover:bg-gray-300 rounded-lg font-black text-sm"
+                            >
+                              -1
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => adjustTotalBote(1)}
+                              className="px-2.5 py-1 bg-teal-100 hover:bg-teal-200 text-teal-900 rounded-lg font-black text-sm"
+                            >
+                              +1
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => adjustTotalBote(24)}
+                              className="px-2.5 py-1 bg-teal-600 text-white rounded-lg font-black text-xs"
+                            >
+                              +1 Case
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="p-3.5 sm:p-4 rounded-2xl bg-emerald-50 border-2 border-emerald-200">
+                        <span className="text-xs sm:text-sm font-black text-emerald-800">
+                          NASA TINDAHAN NGAYON (LAMAN + BASYO)
+                        </span>
+                        <div className="text-2xl sm:text-3xl font-black text-emerald-700 mt-2">
+                          {inStoreCount} pcs
+                        </div>
+                      </div>
+
+                      <div className="p-3.5 sm:p-4 rounded-2xl bg-amber-50 border-2 border-amber-200">
+                        <span className="text-xs sm:text-sm font-black text-amber-900">
+                          NASA CUSTOMER / HIRAM NA BOTE
+                        </span>
+                        <div className="flex justify-between items-baseline mt-2">
+                          <span className="text-2xl sm:text-3xl font-black text-amber-800">
+                            {borrowedCount} pcs
+                          </span>
+                          <span className="text-xs sm:text-sm font-black text-teal-800 bg-teal-100 px-2.5 py-1 rounded-lg">
+                            Deposito: ₱{totalHeldDeposit.toFixed(2)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* FORM PARA MAGLISTA NG KUMUHA NG BOTE */}
+                    {showBoteForm && (
+                      <div className="bg-teal-50/70 p-4 rounded-2xl border-2 border-teal-300 space-y-3">
+                        <h4 className="font-black text-teal-900 text-base sm:text-lg">
+                          📝 Ilista ang Kumuha / Nag-deposito ng Bote
+                        </h4>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs sm:text-sm font-bold text-gray-700 mb-1">
+                              Pangalan ng Customer:
+                            </label>
+                            <input
+                              type="text"
+                              value={boteCustomer}
+                              onChange={(e) => setBoteCustomer(e.target.value)}
+                              placeholder="Hal. Kuya Jun..."
+                              className="w-full p-2.5 sm:p-3 rounded-xl border-2 border-teal-300 font-bold text-base bg-white"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs sm:text-sm font-bold text-gray-700 mb-1">
+                              Anong Bote:
+                            </label>
+                            <select
+                              value={boteBrand}
+                              onChange={(e) => setBoteBrand(e.target.value)}
+                              className="w-full p-2.5 sm:p-3 rounded-xl border-2 border-teal-300 font-bold text-base bg-white"
+                            >
+                              <option value="Softdrinks (Mismo / Kasalo)">
+                                Softdrinks (Mismo / Kasalo)
+                              </option>
+                              <option value="Softdrinks (Litro / 1.5L)">
+                                Softdrinks (Litro / 1.5L)
+                              </option>
+                              <option value="Beer (Red Horse / Grande / San Mig)">
+                                Beer (Red Horse / Grande / San Mig)
+                              </option>
+                            </select>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs sm:text-sm font-bold text-gray-700 mb-1">
+                              Ilang Bote ang Kinuha?
+                            </label>
+                            <input
+                              type="number"
+                              value={boteQty}
+                              onChange={(e) => setBoteQty(e.target.value)}
+                              className="w-full p-2.5 rounded-xl border-2 border-teal-300 font-black text-lg text-center bg-white"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs sm:text-sm font-bold text-gray-700 mb-1">
+                              Iniwan na Deposito (₱):
+                            </label>
+                            <input
+                              type="number"
+                              value={boteDeposit}
+                              onChange={(e) => setBoteDeposit(e.target.value)}
+                              className="w-full p-2.5 rounded-xl border-2 border-teal-300 font-black text-lg text-center bg-white"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-1.5">
+                          <span className="text-xs font-bold text-gray-600 self-center mr-1">
+                            Mabilisang Deposito:
+                          </span>
+                          {[
+                            { label: 'Walang Deposito (₱0)', val: 0 },
+                            { label: '₱5', val: 5 },
+                            { label: '₱10', val: 10 },
+                            { label: '₱20', val: 20 },
+                            { label: '₱50', val: 50 }
+                          ].map((d) => (
+                            <button
+                              key={d.label}
+                              type="button"
+                              onClick={() => setBoteDeposit(String(d.val))}
+                              className={`px-2.5 py-1 rounded-lg font-black text-xs border ${
+                                Number(boteDeposit) === d.val
+                                  ? 'bg-teal-600 text-white border-teal-700'
+                                  : 'bg-white text-teal-900 border-teal-300'
+                              }`}
+                            >
+                              {d.label}
+                            </button>
+                          ))}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={handleAddBorrowedBote}
+                          className="w-full bg-teal-600 hover:bg-teal-700 text-white py-3 rounded-xl font-black text-base shadow-md"
+                        >
+                          ✓ I-Save sa Listahan ng Bote
+                        </button>
+                      </div>
+                    )}
+
+                    {/* LISTAHAN NG MGA HIRAM NA BOTE */}
+                    <div className="space-y-2.5 max-h-[340px] overflow-y-auto">
+                      {(boteData.borrowedList || []).length === 0 ? (
+                        <p className="text-gray-400 text-sm sm:text-lg font-bold text-center py-4">
+                          Walang nakahiram na bote sa ngayon. Nasa tindahan lahat!
+                        </p>
+                      ) : (
+                        boteData.borrowedList.map((b) => (
+                          <div
+                            key={b.id}
+                            className="p-3.5 rounded-2xl bg-gray-50 border-2 border-gray-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3"
+                          >
+                            <div className="min-w-0">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <h4 className="text-base sm:text-xl font-black text-gray-900">
+                                  {b.customer} — {b.qty}x Bote
+                                </h4>
+                                <span
+                                  className={`px-2.5 py-0.5 rounded-lg font-black text-xs ${
+                                    b.deposit > 0
+                                      ? 'bg-teal-100 text-teal-900 border border-teal-300'
+                                      : 'bg-red-100 text-red-800 border border-red-300'
+                                  }`}
+                                >
+                                  {b.deposit > 0
+                                    ? `May Deposito: ₱${Number(b.deposit).toFixed(2)} (Ibalik pag sinauli)`
+                                    : 'Walang Deposito (Singilin ang bote)'}
+                                </span>
+                              </div>
+                              <p className="text-xs sm:text-sm font-bold text-gray-500 mt-0.5">
+                                {b.brand} • {b.date}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleReturnBote(b)}
+                              className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl font-black text-xs sm:text-sm shrink-0"
+                            >
+                              ✓ Sinauli na ang Bote
+                            </button>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* EXPIRING / EXPIRED ITEMS ALERT CARD */}
             <div className="bg-white rounded-2xl sm:rounded-3xl shadow-xl border-2 sm:border-4 border-orange-200 overflow-hidden">
               <div className="bg-orange-50 p-4 sm:p-6 border-b-2 border-orange-200">
