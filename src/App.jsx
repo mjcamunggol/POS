@@ -103,9 +103,9 @@ const normalizeItem = (item) => {
 const DEFAULT_INVENTORY = [];
 
 const PRINT_PRESETS = [
-  { label: 'Xerox / Copy', price: 3 },
-  { label: 'Print (Black & White)', price: 5 },
-  { label: 'Print (Colored)', price: 10 },
+  { label: 'Xerox / Copy', price: 5 },
+  { label: 'Print (Black & White)', price: 10 },
+  { label: 'Print (Colored)', price: 15 },
   { label: 'Print (Picture / Full)', price: 20 }
 ];
 
@@ -167,6 +167,8 @@ const App = () => {
   const [cashTendered, setCashTendered] = useState('');
   const [utangCustomer, setUtangCustomer] = useState('');
   const [showUtangInput, setShowUtangInput] = useState(false);
+  const [discountAmount, setDiscountAmount] = useState('');
+  const [showDiscountBox, setShowDiscountBox] = useState(false);
   const [activeHulogId, setActiveHulogId] = useState(null);
   const [hulogAmount, setHulogAmount] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -188,6 +190,7 @@ const App = () => {
     qty: '',
     packCost: '',
     unitCost: '',
+    costMode: 'unit', 
     targetProfit: '',
     targetPrice: '',
     expiryDate: '',
@@ -413,7 +416,6 @@ const pullFromSheets = useCallback(async () => {
             (scannedItem &&
               prev.name.trim().toLowerCase() === scannedItem.name.toLowerCase());
 
-          // Kung parehong item ang na-scan ulit, dagdagan ng +1 ang bilang!
           const nextQty = isSameItem ? (parseInt(prev.qty, 10) || 0) + 1 : 1;
 
           const activeUnitCost =
@@ -435,6 +437,7 @@ const pullFromSheets = useCallback(async () => {
             barcode,
             name: scannedItem ? scannedItem.name : prev.name,
             qty: String(nextQty),
+            costMode: 'unit', // Naka-lock ang Puhunan/pc!
             unitCost: activeUnitCost > 0 ? activeUnitCost.toFixed(2) : prev.unitCost,
             packCost:
               activeUnitCost > 0
@@ -782,9 +785,26 @@ const pullFromSheets = useCallback(async () => {
       return showMessage('Ilagay muna ang pangalan ng umutang.', 'error');
     }
 
-    const { updatedInventory, saleTotal, totalCost, serviceRevenue, priceDropAlerts } =
-      deductCartFromInventory();
+    const {
+      updatedInventory,
+      saleTotal: rawSaleTotal,
+      totalCost,
+      serviceRevenue,
+      priceDropAlerts
+    } = deductCartFromInventory();
+
+    const appliedDiscount = Math.min(
+      rawSaleTotal,
+      Math.max(0, parseFloat(discountAmount) || 0)
+    );
+    const saleTotal = Math.max(0, rawSaleTotal - appliedDiscount);
     const profitTotal = saleTotal - totalCost;
+
+    const baseSummary = cart.map((i) => `${i.cartQty}x ${i.name}`).join(', ');
+    const itemsSummaryWithDiscount =
+      appliedDiscount > 0
+        ? `${baseSummary} [Discount: -₱${appliedDiscount.toFixed(2)}]`
+        : baseSummary;
 
     setInventory(updatedInventory);
 
@@ -796,7 +816,7 @@ const pullFromSheets = useCallback(async () => {
         cost: totalCost,
         profit: profitTotal,
         serviceRevenue: serviceRevenue,
-        itemsSummary: cart.map((i) => `${i.cartQty}x ${i.name}`).join(', '),
+        itemsSummary: itemsSummaryWithDiscount,
         date: new Date().toLocaleDateString('en-PH', {
           month: 'short',
           day: 'numeric',
@@ -812,7 +832,9 @@ const pullFromSheets = useCallback(async () => {
         utangList: updatedUtang
       });
       showMessage(
-        `Nailista sa utang ni ${utangCustomer.trim()}: ₱${saleTotal.toFixed(2)}`,
+        `Nailista sa utang ni ${utangCustomer.trim()}: ₱${saleTotal.toFixed(2)}${
+          appliedDiscount > 0 ? ` (May Discount: -₱${appliedDiscount.toFixed(2)})` : ''
+        }`,
         'success'
       );
     } else {
@@ -843,8 +865,18 @@ const pullFromSheets = useCallback(async () => {
         ]);
       }
 
+      // Kung may discount, isama sa pangalan ng huling item sa log para makita sa Sheet Ledger
+      const ledgerItems =
+        appliedDiscount > 0 && cart.length > 0
+          ? cart.map((item, idx) =>
+              idx === cart.length - 1
+                ? { ...item, name: `${item.name} (Discount: -₱${appliedDiscount.toFixed(2)})` }
+                : item
+            )
+          : cart;
+
       syncToSheets('recordSale', {
-        items: cart,
+        items: ledgerItems,
         saleTotal,
         profitTotal,
         inventory: updatedInventory
@@ -852,17 +884,24 @@ const pullFromSheets = useCallback(async () => {
 
       if (priceDropAlerts.length > 0) {
         showMessage(
-          `Bayad na! Bumaba na ang presyo ng: ${priceDropAlerts.join(', ')} dahil ubos na ang lumang stock.`,
+          `Bayad na (₱${saleTotal.toFixed(2)})! Bumaba na ang presyo ng: ${priceDropAlerts.join(', ')}.`,
           'success'
         );
       } else {
-        showMessage(`Bayad na! Total: ₱${saleTotal.toFixed(2)}`, 'success');
+        showMessage(
+          `Bayad na! Total: ₱${saleTotal.toFixed(2)}${
+            appliedDiscount > 0 ? ` (Discount: -₱${appliedDiscount.toFixed(2)})` : ''
+          }`,
+          'success'
+        );
       }
     }
 
     playBeep('success');
     setCart([]);
     setCashTendered('');
+    setDiscountAmount('');
+    setShowDiscountBox(false);
     setUtangCustomer('');
     setShowUtangInput(false);
   };
@@ -1063,22 +1102,55 @@ const pullFromSheets = useCallback(async () => {
       ? parseFloat(newStock.packCost) / parseInt(newStock.qty, 10)
       : 0;
 
-  // Auto-compute kapag binago ang Ilang Piraso, Puhunan Pack, o Puhunan/pc
+// Kapag binago ang Ilang Piraso: Kung 'unit' mode (default), NAKA-LOCK ang Puhunan/pc!
   const handleQtyChange = (val) => {
     const qtyNum = parseInt(val, 10);
     setNewStock((prev) => {
       let nextUnit = prev.unitCost;
       let nextPack = prev.packCost;
-      if (qtyNum > 0 && parseFloat(prev.packCost) > 0) {
+
+      if (prev.costMode === 'pack' && qtyNum > 0 && parseFloat(prev.packCost) > 0) {
+        // Nag-type muna sa Puhunan Pack bago naglagay ng Piraso (hal. bagong bili na pack)
         nextUnit = (parseFloat(prev.packCost) / qtyNum).toFixed(2);
       } else if (qtyNum > 0 && parseFloat(prev.unitCost) > 0) {
+        // Naka-lock ang Puhunan/pc! Ang Pack Cost lang ang mag-a-adjust
         nextPack = (parseFloat(prev.unitCost) * qtyNum).toFixed(2);
       }
       return { ...prev, qty: val, unitCost: nextUnit, packCost: nextPack };
     });
   };
 
-  // Pumili ng paninda mula sa Search Dropdown sa Tab 2
+  // Kapag nag-type sa 4A (Puhunan Pack), tsaka lang siya magdi-divide sa bilang ng piraso
+  const handlePackCostChange = (val) => {
+    const packNum = parseFloat(val);
+    const qtyNum = parseInt(newStock.qty, 10);
+    setNewStock((prev) => ({
+      ...prev,
+      costMode: 'pack',
+      packCost: val,
+      unitCost:
+        qtyNum > 0 && !isNaN(packNum) && packNum > 0
+          ? (packNum / qtyNum).toFixed(2)
+          : prev.unitCost
+    }));
+  };
+
+  // Kapag nag-type sa 4B (Puhunan/pc), i-lock ang Puhunan/pc
+  const handleUnitCostChange = (val) => {
+    const unitNum = parseFloat(val);
+    const qtyNum = parseInt(newStock.qty, 10);
+    setNewStock((prev) => ({
+      ...prev,
+      costMode: 'unit',
+      unitCost: val,
+      packCost:
+        qtyNum > 0 && !isNaN(unitNum) && unitNum > 0
+          ? (unitNum * qtyNum).toFixed(2)
+          : ''
+    }));
+  };
+
+  // Pumili ng paninda mula sa Search Dropdown sa Tab 2 (Naka-lock ang Puhunan/pc)
   const selectStockSuggestion = (item) => {
     const isSameItem =
       newStock.barcode === item.barcode &&
@@ -1098,6 +1170,7 @@ const pullFromSheets = useCallback(async () => {
       barcode: item.barcode.startsWith('ITEM-') ? '' : item.barcode,
       name: item.name,
       qty: String(nextQty),
+      costMode: 'unit',
       unitCost: unitCostVal,
       packCost: packCostVal,
       targetPrice: item.price.toFixed(2),
@@ -1107,37 +1180,22 @@ const pullFromSheets = useCallback(async () => {
     playBeep('success');
   };
 
-  // Mabilisang dagdag sa Ilang Piraso (+1, +6, +12, +24)
+  // Mabilisang dagdag sa Ilang Piraso (+1, +6, +8, +10, +12, +24) — Laging naka-lock ang Puhunan/pc!
   const addQuickStockQty = (addAmount) => {
-    const currentQty = parseInt(newStock.qty, 10) || 0;
-    const nextQty = Math.max(1, currentQty + addAmount);
-    handleQtyChange(String(nextQty));
-  };
-
-  const handlePackCostChange = (val) => {
-    const packNum = parseFloat(val);
-    const qtyNum = parseInt(newStock.qty, 10);
-    setNewStock((prev) => ({
-      ...prev,
-      packCost: val,
-      unitCost:
-        qtyNum > 0 && !isNaN(packNum) && packNum > 0
-          ? (packNum / qtyNum).toFixed(2)
-          : prev.unitCost
-    }));
-  };
-
-  const handleUnitCostChange = (val) => {
-    const unitNum = parseFloat(val);
-    const qtyNum = parseInt(newStock.qty, 10);
-    setNewStock((prev) => ({
-      ...prev,
-      unitCost: val,
-      packCost:
-        qtyNum > 0 && !isNaN(unitNum) && unitNum > 0
-          ? (unitNum * qtyNum).toFixed(2)
-          : ''
-    }));
+    setNewStock((prev) => {
+      const currentQty = parseInt(prev.qty, 10) || 0;
+      const nextQty = Math.max(1, currentQty + addAmount);
+      const unitNum = parseFloat(prev.unitCost);
+      return {
+        ...prev,
+        costMode: 'unit',
+        qty: String(nextQty),
+        packCost:
+          !isNaN(unitNum) && unitNum > 0
+            ? (unitNum * nextQty).toFixed(2)
+            : prev.packCost
+      };
+    });
   };
 
   // Auto-format sa MM/YY habang nagta-type (hal. "1126" -> "11/26")
@@ -1340,10 +1398,26 @@ const pullFromSheets = useCallback(async () => {
   // ==========================================
   // 🎨 COMPUTED VALUES FOR RENDER
   // ==========================================
-  const cartTotal = cart.reduce((sum, item) => sum + item.price * item.cartQty, 0);
+  const cartSubtotal = cart.reduce((sum, item) => sum + item.price * item.cartQty, 0);
+  const cartCostTotal = cart.reduce((sum, cartItem) => {
+    if (cartItem.isService) return sum;
+    const invItem = inventory.find((i) => i.id === cartItem.id);
+    const unitCost = invItem ? invItem.cost : cartItem.cost || 0;
+    return sum + unitCost * cartItem.cartQty;
+  }, 0);
+  const maxProfitDiscount = Math.max(0, cartSubtotal - cartCostTotal);
+  const validDiscount = Math.min(
+    cartSubtotal,
+    Math.max(0, parseFloat(discountAmount) || 0)
+  );
+  const cartTotal = Math.max(0, cartSubtotal - validDiscount);
   const cartItemCount = cart.reduce((sum, item) => sum + item.cartQty, 0);
   const sukliAmount =
     parseFloat(cashTendered) >= cartTotal ? parseFloat(cashTendered) - cartTotal : null;
+
+  // Compute Tanggal-Butal (Round down to nearest ₱5 or ₱10)
+  const butalTo5 = cartSubtotal > 5 ? Number((cartSubtotal % 5).toFixed(2)) : 0;
+  const butalTo10 = cartSubtotal > 10 ? Number((cartSubtotal % 10).toFixed(2)) : 0;
 
   const filteredInventory = inventory.filter(
     (item) =>
@@ -2067,53 +2141,125 @@ const pullFromSheets = useCallback(async () => {
 
                 {/* TOTAL & SUKLI SECTION */}
                 <div className="bg-white p-4 sm:p-6 border-t-4 border-gray-200 space-y-3 sm:space-y-4">
-                  <div className="flex justify-between items-end">
-                    <span className="text-gray-500 text-lg sm:text-2xl font-bold">KABUUAN:</span>
-                    <span className="text-3xl sm:text-5xl font-black text-gray-900">
-                      ₱{cartTotal.toFixed(2)}
-                    </span>
-                  </div>
-
+                  {/* DISCOUNT / TROPA / TANGGAL-BUTAL SECTION */}
                   {cart.length > 0 && (
-                    <div className="bg-emerald-50 p-3 sm:p-4 rounded-xl sm:rounded-2xl border-2 border-emerald-200 space-y-2.5 sm:space-y-3">
-                      <label className="block text-emerald-900 font-black text-sm sm:text-lg">
-                        💵 Pera ng Bumibili (Compute Sukli):
-                      </label>
-                      <div className="grid grid-cols-3 gap-1.5 sm:gap-2">
-                        {[20, 50, 100, 200, 500, 1000].map((bill) => (
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center">
+                        <button
+                          type="button"
+                          onClick={() => setShowDiscountBox(!showDiscountBox)}
+                          className={`px-3 py-1.5 rounded-xl font-black text-xs sm:text-sm border-2 transition flex items-center gap-1.5 ${
+                            validDiscount > 0
+                              ? 'bg-purple-600 text-white border-purple-700'
+                              : 'bg-purple-50 text-purple-900 border-purple-300 hover:bg-purple-100'
+                          }`}
+                        >
+                          <span>🏷️ {validDiscount > 0 ? `May Discount: -₱${validDiscount.toFixed(2)}` : 'Magbigay Discount'}</span>
+                        </button>
+                        {validDiscount > 0 && (
                           <button
-                            key={bill}
                             type="button"
-                            onClick={() => setCashTendered(String(bill))}
-                            className={`py-2 rounded-xl font-black text-sm sm:text-lg border-2 ${
-                              Number(cashTendered) === bill
-                                ? 'bg-emerald-600 text-white border-emerald-700'
-                                : 'bg-white text-emerald-800 border-emerald-300 hover:bg-emerald-100'
-                            }`}
+                            onClick={() => {
+                              setDiscountAmount('');
+                              setShowDiscountBox(false);
+                            }}
+                            className="text-xs font-bold text-red-600 hover:underline"
                           >
-                            ₱{bill}
+                            Alisin ang Discount ✕
                           </button>
-                        ))}
+                        )}
                       </div>
-                      <input
-                        type="number"
-                        value={cashTendered}
-                        onChange={(e) => setCashTendered(e.target.value)}
-                        placeholder="O i-type ang binigay na pera..."
-                        className="w-full p-2.5 sm:p-3 rounded-xl border-2 border-emerald-300 text-lg sm:text-2xl font-black text-center bg-white"
-                      />
-                      {sukliAmount !== null && (
-                        <div className="flex justify-between items-center bg-white p-2.5 sm:p-3 rounded-xl border-2 border-emerald-500">
-                          <span className="text-base sm:text-xl font-black text-gray-700">
-                            SUKLI:
-                          </span>
-                          <span className="text-2xl sm:text-4xl font-black text-emerald-600">
-                            ₱{sukliAmount.toFixed(2)}
-                          </span>
+
+                      {showDiscountBox && (
+                        <div className="bg-purple-50 p-3 rounded-2xl border-2 border-purple-300 space-y-2.5">
+                          <label className="block text-purple-900 font-black text-xs sm:text-sm">
+                            Pumili ng Discount:
+                          </label>
+
+                          <div className="flex flex-wrap gap-1.5">
+                            {/* TANGGAL BUTAL BUTTONS */}
+                            {butalTo5 > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => setDiscountAmount(String(butalTo5))}
+                                className="px-2.5 py-1.5 bg-amber-200 hover:bg-amber-300 text-amber-950 rounded-xl font-black text-xs border border-amber-400"
+                              >
+                                Tanggal Butal (-₱{butalTo5} ➔ ₱{(cartSubtotal - butalTo5).toFixed(0)})
+                              </button>
+                            )}
+                            {butalTo10 > 0 && butalTo10 !== butalTo5 && (
+                              <button
+                                type="button"
+                                onClick={() => setDiscountAmount(String(butalTo10))}
+                                className="px-2.5 py-1.5 bg-amber-200 hover:bg-amber-300 text-amber-950 rounded-xl font-black text-xs border border-amber-400"
+                              >
+                                Tanggal Butal (-₱{butalTo10} ➔ ₱{(cartSubtotal - butalTo10).toFixed(0)})
+                              </button>
+                            )}
+
+                            {/* BALIK-PUHUNAN (TROPA / FAMILY COST PRICE) */}
+                            {maxProfitDiscount > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => setDiscountAmount(maxProfitDiscount.toFixed(2))}
+                                className="px-2.5 py-1.5 bg-pink-200 hover:bg-pink-300 text-pink-950 rounded-xl font-black text-xs border border-pink-400"
+                              >
+                                Libre (-₱{maxProfitDiscount.toFixed(2)})
+                              </button>
+                            )}
+
+                            {/* FIXED PESO DISCOUNTS */}
+                            {[5, 10, 20]
+                              .filter((d) => d < cartSubtotal)
+                              .map((d) => (
+                                <button
+                                  key={d}
+                                  type="button"
+                                  onClick={() => setDiscountAmount(String(d))}
+                                  className={`px-2.5 py-1.5 rounded-xl font-black text-xs border ${
+                                    Number(discountAmount) === d
+                                      ? 'bg-purple-600 text-white border-purple-800'
+                                      : 'bg-white text-purple-900 border-purple-300'
+                                  }`}
+                                >
+                                  -₱{d}
+                                </button>
+                              ))}
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-purple-900 shrink-0">
+                              Ibang Halaga (₱):
+                            </span>
+                            <input
+                              type="number"
+                              value={discountAmount}
+                              onChange={(e) => setDiscountAmount(e.target.value)}
+                              placeholder="0.00"
+                              className="w-full p-2 rounded-xl border-2 border-purple-300 font-black text-base text-center bg-white"
+                            />
+                          </div>
                         </div>
                       )}
                     </div>
                   )}
+
+                  {/* KABUUAN DISPLAY */}
+                  <div className="flex justify-between items-end">
+                    <div>
+                      <span className="text-gray-500 text-lg sm:text-2xl font-bold block">
+                        KABUUAN:
+                      </span>
+                      {validDiscount > 0 && (
+                        <span className="text-xs sm:text-sm font-bold text-gray-400 line-through">
+                          Dating ₱{cartSubtotal.toFixed(2)}
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-3xl sm:text-5xl font-black text-gray-900">
+                      ₱{cartTotal.toFixed(2)}
+                    </span>
+                  </div>
 
                   <button
                     onClick={() => processCheckout(false)}
@@ -2154,7 +2300,7 @@ const pullFromSheets = useCallback(async () => {
                         type="text"
                         value={utangCustomer}
                         onChange={(e) => setUtangCustomer(e.target.value)}
-                        placeholder="Hal. Ate Nena..."
+                        placeholder="Palayaw o Buong Pangalan"
                         className="w-full p-2.5 sm:p-3 rounded-xl border-2 border-amber-400 text-lg sm:text-2xl font-bold bg-white"
                       />
                       <div className="flex gap-2">
@@ -3005,7 +3151,7 @@ const pullFromSheets = useCallback(async () => {
                               type="text"
                               value={boteCustomer}
                               onChange={(e) => setBoteCustomer(e.target.value)}
-                              placeholder="Hal. Kuya Jun..."
+                              placeholder="Palayaw o Buong Pangalan"
                               className="w-full p-2.5 sm:p-3 rounded-xl border-2 border-teal-300 font-bold text-base bg-white"
                             />
                           </div>
