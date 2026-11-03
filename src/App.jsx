@@ -2626,11 +2626,11 @@ const pullFromSheets = useCallback(
                     </span>
                     {[
                       { label: '-1', val: -1 },
-                      { label: '+1 pc', val: 1 },
-                      { label: '+6 (Half Dozen)', val: 6 },
-                      { label: '+10 (1 Tali)', val: 10 },
-                      { label: '+12 (1 Dozen)', val: 12 },
-                      { label: '+24 (1 Case)', val: 24 }
+                      { label: '+1', val: 1 },
+                      { label: '+6', val: 6 },
+                      { label: '+10', val: 10 },
+                      { label: '+12', val: 12 },
+                      { label: '+24', val: 24 }
                     ].map((btn) => (
                       <button
                         key={btn.label}
