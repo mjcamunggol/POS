@@ -22,7 +22,8 @@ import {
   Camera,
   CameraOff,
   Heart,
-  Star
+  Star,
+  Scissors
 } from 'lucide-react';
 
 // ==========================================
@@ -168,6 +169,10 @@ const App = () => {
   const [utangCustomer, setUtangCustomer] = useState('');
   const [showUtangInput, setShowUtangInput] = useState(false);
   const [discountAmount, setDiscountAmount] = useState('');
+  // Break-Pack (Buksan ang 1 Pack para ibenta nang Tingi)
+  const [breakPackItem, setBreakPackItem] = useState(null);
+  const [breakPackPcs, setBreakPackPcs] = useState('');
+  const [breakPackPrice, setBreakPackPrice] = useState('');
   const [showDiscountBox, setShowDiscountBox] = useState(false);
   const [activeHulogId, setActiveHulogId] = useState(null);
   const [hulogAmount, setHulogAmount] = useState('');
@@ -476,6 +481,146 @@ const pullFromSheets = useCallback(
     );
     setInventory(updatedInv);
     syncToSheets('syncInventory', { inventory: updatedInv });
+  };
+
+  // ✂️ Buksan ang 1 Pack para gawing Tingi
+  const openBreakPackModal = (packItem) => {
+    setBreakPackItem(packItem);
+    setBreakPackPcs('');
+    setBreakPackPrice('');
+  };
+
+  const handleBreakPackPcsChange = (val) => {
+    setBreakPackPcs(val);
+    const pcs = parseInt(val, 10);
+    if (breakPackItem && pcs > 1) {
+      // Auto-suggest: (Presyo ng Pack / piraso) + ₱1 patong sa pagbubukas, rounded up sa buong piso
+      const suggested = Math.ceil(breakPackItem.price / pcs + 0.5);
+      setBreakPackPrice(String(suggested));
+    } else {
+      setBreakPackPrice('');
+    }
+  };
+
+  const handleConfirmBreakPack = () => {
+    if (!breakPackItem) return;
+    const pcsPerPack = parseInt(breakPackPcs, 10);
+    const tingiPrice = parseFloat(breakPackPrice);
+
+    if (!pcsPerPack || pcsPerPack <= 1 || isNaN(tingiPrice) || tingiPrice <= 0) {
+      playBeep('error');
+      return showMessage(
+        'Ilagay kung ilang piraso ang laman ng 1 pack (hal. 8) at ang presyo kada piraso.',
+        'error'
+      );
+    }
+
+    if (breakPackItem.qty <= 0) {
+      playBeep('error');
+      return showMessage(`Ubos na ang stock ng ${breakPackItem.name}!`, 'error');
+    }
+
+    // 1. Bawasan ng 1 pack ang Pack Item (gamit ang FIFO batch)
+    let packCostUsed = breakPackItem.cost || 0;
+    let packExpiryUsed = '';
+    const updatedBatchesForPack = [];
+    let deducted = false;
+
+    for (const batch of breakPackItem.batches || []) {
+      if (!deducted && batch.qty > 0) {
+        packCostUsed = batch.cost;
+        packExpiryUsed = batch.expiryDate || '';
+        deducted = true;
+        if (batch.qty - 1 > 0) {
+          updatedBatchesForPack.push({ ...batch, qty: batch.qty - 1 });
+        }
+      } else {
+        updatedBatchesForPack.push({ ...batch });
+      }
+    }
+
+    const tingiUnitCost = packCostUsed / pcsPerPack;
+    const tingiName = `${breakPackItem.name} (Tingi)`;
+
+    let targetTingiItem = null;
+    const existingTingiIndex = inventory.findIndex(
+      (i) => i.name.toLowerCase() === tingiName.toLowerCase()
+    );
+
+    let updatedInv = inventory.map((item) => {
+      if (item.id !== breakPackItem.id) return item;
+      return normalizeItem({
+        ...item,
+        batches: updatedBatchesForPack
+      });
+    });
+
+    // 2. Idagdag ang (pcsPerPack) sa Tingi Item at markahan bilang ⭐ Favorite
+    if (existingTingiIndex >= 0) {
+      const existingTingi = updatedInv[existingTingiIndex];
+      const newTingiBatches = [
+        ...(existingTingi.batches || []),
+        {
+          qty: pcsPerPack,
+          cost: tingiUnitCost,
+          price: tingiPrice,
+          expiryDate: packExpiryUsed
+        }
+      ];
+      targetTingiItem = normalizeItem({
+        ...existingTingi,
+        isFavorite: true,
+        batches: newTingiBatches
+      });
+      updatedInv[existingTingiIndex] = targetTingiItem;
+    } else {
+      const newId = createItemId();
+      targetTingiItem = normalizeItem({
+        id: newId,
+        barcode: `ITEM-${newId}`,
+        name: tingiName,
+        isFavorite: true,
+        batches: [
+          {
+            qty: pcsPerPack,
+            cost: tingiUnitCost,
+            price: tingiPrice,
+            expiryDate: packExpiryUsed
+          }
+        ]
+      });
+      updatedInv = [...updatedInv, targetTingiItem];
+    }
+
+    setInventory(updatedInv);
+
+    // 3. Ilagay agad ang 1 piraso ng Tingi sa Basket ng customer
+    setCart((prev) => {
+      const existingInCart = prev.find((i) => i.id === targetTingiItem.id);
+      if (existingInCart) {
+        return prev.map((i) =>
+          i.id === targetTingiItem.id ? { ...i, cartQty: i.cartQty + 1 } : i
+        );
+      }
+      return [...prev, { ...targetTingiItem, cartQty: 1 }];
+    });
+
+    syncToSheets('breakPack', {
+      inventory: updatedInv
+    });
+
+    playBeep('success');
+    showMessage(
+      `✂️ Binuksan ang 1 pack! Nasa basket na ang 1x ${tingiName} (₱${tingiPrice.toFixed(
+        2
+      )}) at nasa 🥚 Tingi na ang natitirang ${pcsPerPack - 1} pcs.`,
+      'success'
+    );
+
+    setBreakPackItem(null);
+    setBreakPackPcs('');
+    setBreakPackPrice('');
+    setSearchQuery('');
   };
 
   // Keep latest scan handler in a ref so the camera loop never uses stale inventory/cart state
@@ -1671,47 +1816,136 @@ const pullFromSheets = useCallback(
                     filteredInventory.map((item) => (
                       <div
                         key={item.id}
-                        className="p-4 sm:p-6 border-b-2 border-gray-100 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 sm:gap-4 bg-white hover:bg-emerald-50"
+                        className="p-4 sm:p-6 border-b-2 border-gray-100 space-y-3 bg-white hover:bg-emerald-50/40"
                       >
-                        <div>
-                          <div className="flex items-center gap-2">
+                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 sm:gap-4">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => toggleFavorite(item.id)}
+                                title="Ilagay o alisin sa Tingi / Paborito"
+                                className={`p-1.5 rounded-xl border-2 transition ${
+                                  item.isFavorite
+                                    ? 'bg-amber-400 text-white border-amber-500'
+                                    : 'bg-gray-100 text-gray-400 border-gray-200 hover:text-amber-500'
+                                }`}
+                              >
+                                <Star className="w-5 h-5 fill-current" />
+                              </button>
+                              <h3 className="text-xl sm:text-3xl font-black text-gray-800">
+                                {item.name}
+                              </h3>
+                            </div>
+                            <p className="text-gray-500 text-sm sm:text-xl mt-1 font-bold flex flex-wrap items-center gap-1.5">
+                              <Package className="w-4 h-4 sm:w-6 sm:h-6" /> Stock: {item.qty} pcs
+                              {item.batches && item.batches.length > 1 && (
+                                <span className="text-amber-600">
+                                  ({item.batches[0].qty} pcs sa lumang presyo)
+                                </span>
+                              )}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-2 sm:gap-3 w-full sm:w-auto justify-between sm:justify-end">
+                            <span className="text-2xl sm:text-4xl font-black text-emerald-700 mr-1">
+                              ₱{item.price.toFixed(2)}
+                            </span>
+
+                            <div className="flex items-center gap-2">
+                              {/* ✂️ BUKSAN 1 PACK BUTTON (KUNG MAY STOCK AT HINDI PA TINGI) */}
+                              {item.qty > 0 && !item.name.toLowerCase().includes('(tingi)') && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    breakPackItem?.id === item.id
+                                      ? setBreakPackItem(null)
+                                      : openBreakPackModal(item)
+                                  }
+                                  className="bg-amber-100 hover:bg-amber-200 text-amber-900 border-2 border-amber-300 px-3 py-3 sm:px-4 sm:py-4 rounded-xl sm:rounded-2xl text-xs sm:text-base font-black flex items-center gap-1.5 active:scale-95 transition"
+                                >
+                                  <Scissors className="w-4 h-4 sm:w-5 sm:h-5" />
+                                  <span>I-tingi</span>
+                                </button>
+                              )}
+
+                              <button
+                                onClick={() => addToCart(item)}
+                                disabled={item.qty <= 0}
+                                className="bg-emerald-600 text-white px-4 py-3 sm:px-7 sm:py-4 rounded-xl sm:rounded-2xl text-base sm:text-2xl font-black hover:bg-emerald-700 disabled:bg-gray-400 shadow-md active:scale-95 transition-transform"
+                              >
+                                {item.qty > 0 ? '+ IDAGDAG' : 'UBOS NA'}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* COLLAPSIBLE DRAWER PARA SA PAGBUKAS NG 1 PACK */}
+                        {breakPackItem?.id === item.id && (
+                          <div className="bg-amber-50 p-3.5 sm:p-4 rounded-2xl border-2 border-amber-400 space-y-3">
+                            <div className="flex justify-between items-center">
+                              <h4 className="font-black text-amber-950 text-sm sm:text-lg">
+                                ✂️ Buksan ang 1 Pack ng "{item.name}" para sa Tingi:
+                              </h4>
+                              <button
+                                type="button"
+                                onClick={() => setBreakPackItem(null)}
+                                className="text-xs font-bold text-gray-500 hover:text-gray-800"
+                              >
+                                Kansela ✕
+                              </button>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-xs sm:text-sm font-bold text-gray-700 mb-1">
+                                  Ilang Piraso sa 1 Pack?
+                                </label>
+                                <input
+                                  type="number"
+                                  value={breakPackPcs}
+                                  onChange={(e) => handleBreakPackPcsChange(e.target.value)}
+                                  placeholder="Hal. 8"
+                                  className="w-full p-2.5 border-2 border-amber-300 rounded-xl font-black text-lg text-center bg-white"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs sm:text-sm font-bold text-gray-700 mb-1">
+                                  Presyo Kada 1 Piraso (₱):
+                                </label>
+                                <input
+                                  type="number"
+                                  value={breakPackPrice}
+                                  onChange={(e) => setBreakPackPrice(e.target.value)}
+                                  placeholder="Hal. 7.00"
+                                  className="w-full p-2.5 border-2 border-emerald-400 rounded-xl font-black text-lg text-emerald-700 text-center bg-white"
+                                />
+                              </div>
+                            </div>
+
+                            {parseInt(breakPackPcs, 10) > 1 && (
+                              <p className="text-xs sm:text-sm font-bold text-gray-600">
+                                💡 Puhunan kada piraso:{' '}
+                                <span className="font-black text-gray-900">
+                                  ₱{(item.cost / parseInt(breakPackPcs, 10)).toFixed(2)}/pc
+                                </span>{' '}
+                                • Ang natitirang{' '}
+                                <span className="font-black text-amber-900">
+                                  {parseInt(breakPackPcs, 10) - 1} pcs
+                                </span>{' '}
+                                ay awtomatikong ilalagay sa 🥚 Tingi!
+                              </p>
+                            )}
+
                             <button
                               type="button"
-                              onClick={() => toggleFavorite(item.id)}
-                              title="Ilagay o alisin sa Tingi / Paborito"
-                              className={`p-1.5 rounded-xl border-2 transition ${
-                                item.isFavorite
-                                  ? 'bg-amber-400 text-white border-amber-500'
-                                  : 'bg-gray-100 text-gray-400 border-gray-200 hover:text-amber-500'
-                              }`}
+                              onClick={handleConfirmBreakPack}
+                              className="w-full bg-amber-600 hover:bg-amber-700 text-white py-3 rounded-xl font-black text-sm sm:text-lg shadow-md"
                             >
-                              <Star className="w-5 h-5 fill-current" />
+                              Ilagay sa Basket
                             </button>
-                            <h3 className="text-xl sm:text-3xl font-black text-gray-800">
-                              {item.name}
-                            </h3>
                           </div>
-                          <p className="text-gray-500 text-sm sm:text-xl mt-1 font-bold flex flex-wrap items-center gap-1.5">
-                            <Package className="w-4 h-4 sm:w-6 sm:h-6" /> Stock: {item.qty} pcs
-                            {item.batches && item.batches.length > 1 && (
-                              <span className="text-amber-600">
-                                ({item.batches[0].qty} pcs sa lumang presyo)
-                              </span>
-                            )}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-4 w-full sm:w-auto justify-between sm:justify-end">
-                          <span className="text-2xl sm:text-4xl font-black text-emerald-700">
-                            ₱{item.price.toFixed(2)}
-                          </span>
-                          <button
-                            onClick={() => addToCart(item)}
-                            disabled={item.qty <= 0}
-                            className="bg-emerald-600 text-white px-5 py-3 sm:px-8 sm:py-5 rounded-xl sm:rounded-2xl text-lg sm:text-2xl font-black hover:bg-emerald-700 disabled:bg-gray-400 shadow-md active:scale-95 transition-transform"
-                          >
-                            {item.qty > 0 ? '+ IDAGDAG' : 'UBOS NA'}
-                          </button>
-                        </div>
+                        )}
                       </div>
                     ))
                   ) : (
