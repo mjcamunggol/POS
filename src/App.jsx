@@ -287,29 +287,41 @@ const App = () => {
     }
   }, []);
 
-const pullFromSheets = useCallback(async () => {
-    if (!SCRIPT_URL) return;
-    setSyncStatus('Naglo-load...');
-    const flushed = await flushOfflineQueue();
-    if (!flushed) return;
+const pullFromSheets = useCallback(
+    async (forceFromSheet = false) => {
+      if (!SCRIPT_URL) return;
+      setSyncStatus('Naglo-load...');
 
-    try {
-      const res = await fetch(`${SCRIPT_URL}?action=getData`);
-      const data = await res.json();
-      if (data.inventory && Array.isArray(data.inventory)) {
-        setInventory(data.inventory.map(normalizeItem));
+      // Kung pinindot mismo ang "I-Sync" button, huwag hayaang i-overwrite ng lumang offline queue ang Google Sheet
+      if (forceFromSheet) {
+        localStorage.removeItem('tindahan_offline_queue');
+      } else {
+        const flushed = await flushOfflineQueue();
+        if (!flushed) return;
       }
-      if (data.utangList && Array.isArray(data.utangList)) {
-        setUtangList(data.utangList);
+
+      try {
+        // Ang &t=${Date.now()} ay pumipigil sa browser na ibalik ang lumang cached data
+        const res = await fetch(`${SCRIPT_URL}?action=getData&t=${Date.now()}`, {
+          cache: 'no-store'
+        });
+        const data = await res.json();
+        if (data.inventory && Array.isArray(data.inventory)) {
+          setInventory(data.inventory.map(normalizeItem));
+        }
+        if (data.utangList && Array.isArray(data.utangList)) {
+          setUtangList(data.utangList);
+        }
+        if (data.boteData) {
+          setBoteData(data.boteData);
+        }
+        setSyncStatus('Naka-save sa Cloud');
+      } catch {
+        setSyncStatus('Offline (Saved sa Device)');
       }
-      if (data.boteData) {
-        setBoteData(data.boteData);
-      }
-      setSyncStatus('🟢');
-    } catch {
-      setSyncStatus('Offline (Saved sa Device)');
-    }
-  }, [flushOfflineQueue]);
+    },
+    [flushOfflineQueue]
+  );
 
   useEffect(() => {
     pullFromSheets();
@@ -1497,7 +1509,7 @@ const pullFromSheets = useCallback(async () => {
           <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
             {SCRIPT_URL && (
               <button
-                onClick={pullFromSheets}
+                onClick={() => pullFromSheets(true)}
                 className="bg-emerald-800 hover:bg-emerald-900 px-2.5 py-2 sm:px-4 sm:py-3 rounded-xl sm:rounded-2xl font-bold flex items-center gap-1.5 text-xs sm:text-base active:scale-95 transition"
               >
                 <RefreshCw className="w-4 h-4 sm:w-5 sm:h-5" />
