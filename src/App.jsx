@@ -348,7 +348,7 @@ const syncToSheets = async (action, payload) => {
       });
       const data = await res.json();
 
-      // Awtomatikong kunin ang pinagsamang inventory mula sa lahat ng devices!
+      // Sync Merged data from devices
       if (data && data.status === 'success') {
         if (Array.isArray(data.inventory)) {
           setInventory(data.inventory.map(normalizeItem));
