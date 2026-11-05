@@ -320,7 +320,7 @@ const pullFromSheets = useCallback(
         if (data.boteData) {
           setBoteData(data.boteData);
         }
-        setSyncStatus('Naka-save sa Cloud');
+        setSyncStatus('🟢');
       } catch {
         setSyncStatus('Offline (Saved sa Device)');
       }
@@ -362,7 +362,7 @@ const syncToSheets = async (action, payload) => {
       }
 
       localStorage.removeItem('tindahan_offline_queue');
-      setSyncStatus('Naka-save sa Cloud');
+      setSyncStatus('🟢');
     } catch {
       const savedQueue = JSON.parse(localStorage.getItem('tindahan_offline_queue') || '[]');
       const updatedQueue = [...savedQueue, eventRecord];
