@@ -334,7 +334,7 @@ const pullFromSheets = useCallback(
     return () => window.removeEventListener('online', pullFromSheets);
   }, [pullFromSheets]);
 
-  const syncToSheets = async (action, payload) => {
+const syncToSheets = async (action, payload) => {
     if (!SCRIPT_URL) return;
     const eventRecord = { action, timestamp: new Date().toISOString(), ...payload };
 
@@ -342,12 +342,27 @@ const pullFromSheets = useCallback(
     try {
       const savedQueue = JSON.parse(localStorage.getItem('tindahan_offline_queue') || '[]');
       const fullQueue = [...savedQueue, eventRecord];
-      await fetch(SCRIPT_URL, {
+      const res = await fetch(SCRIPT_URL, {
         method: 'POST',
         body: JSON.stringify({ queue: fullQueue })
       });
+      const data = await res.json();
+
+      // Awtomatikong kunin ang pinagsamang inventory mula sa lahat ng devices!
+      if (data && data.status === 'success') {
+        if (Array.isArray(data.inventory)) {
+          setInventory(data.inventory.map(normalizeItem));
+        }
+        if (Array.isArray(data.utangList)) {
+          setUtangList(data.utangList);
+        }
+        if (data.boteData) {
+          setBoteData(data.boteData);
+        }
+      }
+
       localStorage.removeItem('tindahan_offline_queue');
-      setSyncStatus('🟢');
+      setSyncStatus('Naka-save sa Cloud');
     } catch {
       const savedQueue = JSON.parse(localStorage.getItem('tindahan_offline_queue') || '[]');
       const updatedQueue = [...savedQueue, eventRecord];
