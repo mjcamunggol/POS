@@ -169,7 +169,6 @@ const App = () => {
   const [utangCustomer, setUtangCustomer] = useState('');
   const [showUtangInput, setShowUtangInput] = useState(false);
   const [discountAmount, setDiscountAmount] = useState('');
-  // Break-Pack (Buksan ang 1 Pack para ibenta nang Tingi)
   const [breakPackItem, setBreakPackItem] = useState(null);
   const [breakPackPcs, setBreakPackPcs] = useState('');
   const [breakPackPrice, setBreakPackPrice] = useState('');
@@ -177,6 +176,34 @@ const App = () => {
   const [activeHulogId, setActiveHulogId] = useState(null);
   const [hulogAmount, setHulogAmount] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  const [lastSaleBackup, setLastSaleBackup] = useState(null);
+  const undoTimerRef = useRef(null);
+  const [editingPriceId, setEditingPriceId] = useState(null);
+  const [tempQuickPrice, setTempQuickPrice] = useState('');
+  const handleSaveQuickPrice = (item) => {
+    const newP = parseFloat(tempQuickPrice);
+    if (!newP || newP <= 0) {
+      playBeep('error');
+      return showMessage('Ilagay ang tamang bagong presyo.', 'error');
+    }
+
+    const updatedInv = inventory.map((inv) => {
+      if (inv.id !== item.id) return inv;
+      const updatedBatches = (inv.batches || []).map((b) => ({ ...b, price: newP }));
+      return normalizeItem({
+        ...inv,
+        price: newP,
+        batches: updatedBatches
+      });
+    });
+
+    setInventory(updatedInv);
+    setEditingPriceId(null);
+    setTempQuickPrice('');
+    playBeep('success');
+    syncToSheets('syncInventory', { inventory: updatedInv });
+    showMessage(`Na-update ang presyo ng ${item.name} sa ₱${newP.toFixed(2)}!`, 'success');
+  };
 
   // GCash / Bank States
   const [gcashType, setGcashType] = useState('CASH-IN'); // 'CASH-IN' | 'CASH-OUT'
@@ -238,6 +265,9 @@ const App = () => {
   // ==========================================
   const playBeep = useCallback(
     (type = 'success') => {
+      if (navigator.vibrate) {
+        navigator.vibrate(type === 'success' ? 50 : 150);
+      }
       if (!soundEnabled) return;
       try {
         const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -297,8 +327,8 @@ const pullFromSheets = useCallback(
       if (!SCRIPT_URL) return;
       setSyncStatus('Naglo-load...');
 
-      // Kung pinindot mismo ang "I-Sync" button, huwag hayaang i-overwrite ng lumang offline queue ang Google Sheet
-      if (forceFromSheet) {
+      // Kung pinindot mismo ang "I-Sync" button (strictly true), huwag hayaang i-overwrite ng lumang offline queue ang Google Sheet
+      if (forceFromSheet === true) {
         localStorage.removeItem('tindahan_offline_queue');
       } else {
         const flushed = await flushOfflineQueue();
@@ -978,35 +1008,74 @@ const syncToSheets = async (action, payload) => {
         ? `${baseSummary} [Discount: -₱${appliedDiscount.toFixed(2)}]`
         : baseSummary;
 
-    setInventory(updatedInventory);
+      // I-save para sa 1-Minute Undo Backup
+    setLastSaleBackup({
+      cartItems: cart,
+      inventory: inventory, 
+      saleTotal,
+      profitTotal,
+      totalCost,
+      serviceRevenue
+    });
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    undoTimerRef.current = setTimeout(() => setLastSaleBackup(null), 60000); // Mawawala pagkalipas ng 1 minuto
+
+      setInventory(updatedInventory);
 
     if (isUtang) {
-      const newUtangRecord = {
-        id: createItemId(),
-        customer: utangCustomer.trim(),
-        amount: saleTotal,
-        cost: totalCost,
-        profit: profitTotal,
-        serviceRevenue: serviceRevenue,
-        itemsSummary: itemsSummaryWithDiscount,
-        date: new Date().toLocaleDateString('en-PH', {
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit'
-        })
-      };
-      const updatedUtang = [newUtangRecord, ...utangList];
+      const trimmedCustomer = utangCustomer.trim();
+      const existingUtangIndex = utangList.findIndex(
+        (u) => u.customer.toLowerCase() === trimmedCustomer.toLowerCase()
+      );
+
+      let updatedUtang = [];
+      if (existingUtangIndex >= 0) {
+        // Kung may utang na siya dati, pagsamahin ang balot, halaga, at items!
+        const prevU = utangList[existingUtangIndex];
+        const mergedRecord = {
+          ...prevU,
+          amount: prevU.amount + saleTotal,
+          cost: prevU.cost + totalCost,
+          profit: prevU.profit + profitTotal,
+          serviceRevenue: (prevU.serviceRevenue || 0) + serviceRevenue,
+          itemsSummary: `${prevU.itemsSummary}, ${itemsSummaryWithDiscount}`,
+          date: new Date().toLocaleDateString('en-PH', {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+          })
+        };
+        updatedUtang = utangList.map((u, idx) =>
+          idx === existingIndex ? mergedRecord : u
+        );
+      } else {
+        const newUtangRecord = {
+          id: createItemId(),
+          customer: trimmedCustomer,
+          amount: saleTotal,
+          cost: totalCost,
+          profit: profitTotal,
+          serviceRevenue: serviceRevenue,
+          itemsSummary: itemsSummaryWithDiscount,
+          date: new Date().toLocaleDateString('en-PH', {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+          })
+        };
+        updatedUtang = [newUtangRecord, ...utangList];
+      }
+
       setUtangList(updatedUtang);
       syncToSheets('recordUtang', {
-        utang: newUtangRecord,
+        utang: updatedUtang[0],
         inventory: updatedInventory,
         utangList: updatedUtang
       });
       showMessage(
-        `Nailista sa utang ni ${utangCustomer.trim()}: ₱${saleTotal.toFixed(2)}${
-          appliedDiscount > 0 ? ` (May Discount: -₱${appliedDiscount.toFixed(2)})` : ''
-        }`,
+        `Nailista sa utang ni ${trimmedCustomer}: ₱${saleTotal.toFixed(2)}`,
         'success'
       );
     } else {
@@ -1076,6 +1145,25 @@ const syncToSheets = async (action, payload) => {
     setShowDiscountBox(false);
     setUtangCustomer('');
     setShowUtangInput(false);
+  };
+
+  const handleUndoLastSale = () => {
+    if (!lastSaleBackup) return;
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+
+    // Ibalik ang inventory at ibalik ang cart items para ma-edit pa
+    setInventory(lastSaleBackup.inventory);
+    setCart(lastSaleBackup.cartItems);
+    setDailyStats((prev) => ({
+      sales: prev.sales - lastSaleBackup.saleTotal,
+      profit: prev.profit - lastSaleBackup.profitTotal,
+      puhunan: prev.puhunan - lastSaleBackup.totalCost,
+      serviceProfit: (prev.serviceProfit || 0) - lastSaleBackup.serviceRevenue
+    }));
+
+    setLastSaleBackup(null);
+    playBeep('success');
+    showMessage('Na-bawi ang huling benta! Ibinalik sa basket ang mga paninda.', 'success');
   };
 
   const handleBayadPagmamahal = () => {
@@ -1744,6 +1832,24 @@ const syncToSheets = async (action, payload) => {
         </div>
       )}
 
+      {/* 1-MINUTE UNDO BANNER */}
+      {lastSaleBackup && (
+        <div className="max-w-6xl mx-auto mt-3 px-3 sm:px-4">
+          <div className="bg-amber-100 border-2 border-amber-400 p-3 rounded-2xl flex justify-between items-center shadow-md">
+            <span className="text-amber-950 font-black text-xs sm:text-base">
+              ⚠️ Kakaproseso lang ng benta (₱{lastSaleBackup.saleTotal.toFixed(2)}). Nagbago ba ang isip?
+            </span>
+            <button
+              type="button"
+              onClick={handleUndoLastSale}
+              className="bg-amber-600 hover:bg-amber-700 text-white px-3.5 py-2 rounded-xl font-black text-xs sm:text-sm shadow active:scale-95 transition"
+            >
+              ↩️ Bawiin ang Benta
+            </button>
+          </div>
+        </div>
+      )}
+
       <main className="max-w-6xl mx-auto mt-4 sm:mt-8 px-3 sm:px-4">
         {/* ==================== TAB 1: MAGBENTA ==================== */}
         {activeTab === 'sell' && (
@@ -1862,12 +1968,48 @@ const syncToSheets = async (action, payload) => {
                             </p>
                           </div>
 
-                          <div className="flex items-center gap-2 sm:gap-3 w-full sm:w-auto justify-between sm:justify-end">
-                            <span className="text-2xl sm:text-4xl font-black text-emerald-700 mr-1">
-                              ₱{item.price.toFixed(2)}
-                            </span>
+                          <div className="flex flex-col items-end gap-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-2xl sm:text-4xl font-black text-emerald-700">
+                                ₱{item.price.toFixed(2)}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (editingPriceId === item.id) {
+                                    setEditingPriceId(null);
+                                  } else {
+                                    setEditingPriceId(item.id);
+                                    setTempQuickPrice(String(item.price));
+                                  }
+                                }}
+                                title="Baguhin ang Presyo"
+                                className="p-1.5 bg-gray-100 hover:bg-emerald-100 text-gray-600 hover:text-emerald-700 rounded-lg text-xs font-black transition"
+                              >
+                                ✏️
+                              </button>
+                            </div>
 
-                            <div className="flex items-center gap-2">
+                            {editingPriceId === item.id && (
+                              <div className="flex items-center gap-1.5 bg-gray-100 p-2 rounded-xl border border-gray-300 mt-1">
+                                <input
+                                  type="number"
+                                  value={tempQuickPrice}
+                                  onChange={(e) => setTempQuickPrice(e.target.value)}
+                                  className="w-24 p-1.5 text-center font-black text-sm bg-white border rounded-lg"
+                                  placeholder="Bagong Presyo"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleSaveQuickPrice(item)}
+                                  className="bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 py-1.5 rounded-lg text-xs font-black"
+                                >
+                                  I-save
+                                </button>
+                              </div>
+                            )}
+
+                            <div className="flex items-center gap-2 mt-1">
                               {/* ✂️ BUKSAN 1 PACK BUTTON (KUNG MAY STOCK AT HINDI PA TINGI) */}
                               {item.qty > 0 && !item.name.toLowerCase().includes('(tingi)') && (
                                 <button
@@ -2505,29 +2647,97 @@ const syncToSheets = async (action, payload) => {
                     </div>
                   )}
 
-                  {/* KABUUAN DISPLAY */}
-                  <div className="flex justify-between items-end">
-                    <div>
-                      <span className="text-gray-500 text-lg sm:text-2xl font-bold block">
-                        KABUUAN:
+                  {/* KABUUAN DISPLAY (CENTERED) */}
+                  <div className="text-center py-1">
+                    <span className="text-gray-500 text-base sm:text-xl font-bold block">
+                      KABUUAN:
+                    </span>
+                    {validDiscount > 0 && (
+                      <span className="text-xs sm:text-sm font-bold text-gray-400 line-through block">
+                        Dating ₱{cartSubtotal.toFixed(2)}
                       </span>
-                      {validDiscount > 0 && (
-                        <span className="text-xs sm:text-sm font-bold text-gray-400 line-through">
-                          Dating ₱{cartSubtotal.toFixed(2)}
-                        </span>
-                      )}
-                    </div>
-                    <span className="text-3xl sm:text-5xl font-black text-gray-900">
+                    )}
+                    <span className="text-4xl sm:text-5xl font-black text-gray-900 block mt-0.5">
                       ₱{cartTotal.toFixed(2)}
                     </span>
                   </div>
+
+                  {/* SUKLI CALCULATOR SECTION (CENTERED & BALANCED) */}
+                  {cart.length > 0 && (
+                    <div className="bg-gray-50 p-3.5 sm:p-4 rounded-xl sm:rounded-2xl border-2 border-gray-200 space-y-3 text-center">
+                      <div className="relative flex justify-center items-center">
+                        <label className="text-gray-700 font-black text-xs sm:text-base">
+                          💵 Suklian:
+                        </label>
+                        {cashTendered && (
+                          <button
+                            type="button"
+                            onClick={() => setCashTendered('')}
+                            className="absolute right-0 text-xs font-bold text-red-600 hover:underline"
+                          >
+                            I-clear ✕
+                          </button>
+                        )}
+                      </div>
+
+                      {/* MABILISANG BUONG PERA BUTTONS (3x2 SA MOBILE, 6 PANTAY SA DESKTOP) */}
+                      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                        {[20, 50, 100, 200, 500, 1000].map((bill) => (
+                          <button
+                            key={bill}
+                            type="button"
+                            onClick={() => setCashTendered(String(bill))}
+                            className={`py-2 rounded-xl font-black text-xs sm:text-sm border-2 transition active:scale-95 ${
+                              Number(cashTendered) === bill
+                                ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm'
+                                : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-100'
+                            }`}
+                          >
+                            ₱{bill}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* FULL-WIDTH CENTERED SUKLI BOX */}
+                      <div
+                        className={`w-full p-3 rounded-xl border-2 text-center transition ${
+                          sukliAmount !== null
+                            ? 'bg-emerald-50 border-emerald-400'
+                            : cashTendered && parseFloat(cashTendered) < cartTotal
+                            ? 'bg-red-50 border-red-300'
+                            : 'bg-white border-gray-200'
+                        }`}
+                      >
+                        <span className="text-xs font-black text-gray-500 block">
+                          {cashTendered && parseFloat(cashTendered) < cartTotal
+                            ? 'KULANG PA:'
+                            : 'SUKLI:'}
+                        </span>
+                        <span
+                          className={`text-2xl sm:text-3xl font-black block mt-0.5 ${
+                            sukliAmount !== null
+                              ? 'text-emerald-700'
+                              : cashTendered && parseFloat(cashTendered) < cartTotal
+                              ? 'text-red-600'
+                              : 'text-gray-400'
+                          }`}
+                        >
+                          {sukliAmount !== null
+                            ? `₱${sukliAmount.toFixed(2)}`
+                            : cashTendered && parseFloat(cashTendered) < cartTotal
+                            ? `₱${(cartTotal - parseFloat(cashTendered)).toFixed(2)}`
+                            : '₱0.00'}
+                        </span>
+                      </div>
+                    </div>
+                  )}
 
                   <button
                     onClick={() => processCheckout(false)}
                     disabled={cart.length === 0}
                     className="w-full bg-emerald-600 text-white text-xl sm:text-3xl font-black py-4 sm:py-5 rounded-xl sm:rounded-2xl shadow-xl hover:bg-emerald-700 active:bg-emerald-800 disabled:bg-gray-300 flex justify-center items-center gap-2 sm:gap-3"
                   >
-                    <Check className="w-7 h-7 sm:w-9 sm:h-9" /> BAYARAN NA (CASH)
+                    <Check className="w-7 h-7 sm:w-9 sm:h-9" /> BAYARAN NA
                   </button>
 
                   {cart.length > 0 && !showUtangInput && (
@@ -2557,6 +2767,30 @@ const syncToSheets = async (action, payload) => {
                       <label className="block font-black text-amber-900 text-sm sm:text-lg">
                         Pangalan ng Umutang:
                       </label>
+                      {utangList.length > 0 && (
+                        <div>
+                          <span className="text-xs font-bold text-amber-800 block mb-1">
+                            Piliin ang dating umutang (1-Tap):
+                          </span>
+                          <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                            {utangList.map((u) => (
+                              <button
+                                key={u.id}
+                                type="button"
+                                onClick={() => setUtangCustomer(u.customer)}
+                                className={`px-2.5 py-1 rounded-lg font-black text-xs border transition active:scale-95 ${
+                                  utangCustomer.trim().toLowerCase() === u.customer.toLowerCase()
+                                    ? 'bg-amber-600 text-white border-amber-800'
+                                    : 'bg-white text-amber-950 border-amber-300 hover:bg-amber-100'
+                                }`}
+                              >
+                                👤 {u.customer} (₱{u.amount.toFixed(0)})
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
                       <input
                         type="text"
                         value={utangCustomer}
