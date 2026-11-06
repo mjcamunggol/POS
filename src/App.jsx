@@ -1688,19 +1688,33 @@ const App = () => {
   const butalTo5 = cartSubtotal > 5 ? Number((cartSubtotal % 5).toFixed(2)) : 0;
   const butalTo10 = cartSubtotal > 10 ? Number((cartSubtotal % 10).toFixed(2)) : 0;
 
-  const filteredInventory = inventory.filter(
-    (item) =>
-      item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.barcode === searchQuery.trim()
-  );
+  // 🔍 UPGRADED SMART SEARCH LOGIC
+  const filteredInventory = inventory.filter((item) => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return false;
+    
+    // 1. Exact Barcode Match (Prevents false positives)
+    if (item.barcode === searchQuery.trim()) return true;
+
+    // 2. Jumbled Words Match (e.g. "20g nescafe" finds "Nescafe Classic 20g")
+    const searchTerms = query.split(/\s+/); // Hahatiin ang tinype sa mga salita
+    const itemNameLower = item.name.toLowerCase();
+    
+    // Dapat lahat ng salitang tinype ay makikita sa pangalan ng paninda
+    return searchTerms.every(term => itemNameLower.includes(term));
+  });
 
   const stockSuggestions = newStock.name.trim()
     ? inventory
-        .filter(
-          (item) =>
-            item.name.toLowerCase().includes(newStock.name.trim().toLowerCase()) ||
-            item.barcode.includes(newStock.name.trim())
-        )
+        .filter((item) => {
+          const query = newStock.name.trim().toLowerCase();
+          
+          if (item.barcode === newStock.name.trim()) return true;
+
+          const searchTerms = query.split(/\s+/);
+          const itemNameLower = item.name.toLowerCase();
+          return searchTerms.every(term => itemNameLower.includes(term));
+        })
         .slice(0, 8)
     : [];
 
