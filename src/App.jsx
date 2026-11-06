@@ -15,7 +15,6 @@ import {
   BookOpen,
   AlertTriangle,
   RefreshCw,
-  RotateCcw,
   Smartphone,
   Printer,
   Trash2,
@@ -33,13 +32,14 @@ const SCRIPT_URL = import.meta.env.VITE_GOOGLE_APPS_SCRIPT_URL?.trim() ?? "";
 
 const createItemId = () => Date.now() + Math.floor(Math.random() * 1000);
 
+const emptyStatsBucket = () => ({ sales: 0, profit: 0, puhunan: 0, serviceProfit: 0 });
+
 // ==========================================
 // 🧠 SMART PRICE-PROTECTION ENGINE (FIFO)
 // ==========================================
 const normalizeExpiryMMYY = (raw) => {
   if (!raw) return '';
   const str = String(raw).trim();
-  // Kung YYYY-MM-DD o YYYY-MM ang lumang nakasave, gawing MM/YY
   const isoMatch = str.match(/^(\d{4})-(\d{2})/);
   if (isoMatch) {
     return `${isoMatch[2]}/${isoMatch[1].slice(2)}`;
@@ -100,7 +100,6 @@ const normalizeItem = (item) => {
   };
 };
 
-// Starts empty so deleted starter items don't come back
 const DEFAULT_INVENTORY = [];
 
 const PRINT_PRESETS = [
@@ -112,11 +111,11 @@ const PRINT_PRESETS = [
 
 const App = () => {
   const [activeTab, setActiveTab] = useState('sell');
-  const [activeDrawer, setActiveDrawer] = useState(null); // 'tingi' | 'gcash' | 'print' | null
+  const [activeDrawer, setActiveDrawer] = useState(null);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [syncStatus, setSyncStatus] = useState(SCRIPT_URL ? 'Naka-konekta' : 'Local Mode');
 
-  // Persisted Inventory, Utang, Daily Stats, and Service Logs
+  // Persisted Inventory, Utang, Cloud Stats, and Service Logs
   const [inventory, setInventory] = useState(() => {
     const saved = localStorage.getItem('tindahan_inventory');
     if (saved) {
@@ -134,24 +133,55 @@ const App = () => {
     return saved ? JSON.parse(saved) : [];
   });
 
-  const [dailyStats, setDailyStats] = useState(() => {
-    const saved = localStorage.getItem('tindahan_stats');
-    return saved
-      ? JSON.parse(saved)
-      : { sales: 0, profit: 0, puhunan: 0, serviceProfit: 0 };
+  const [cloudStats, setCloudStats] = useState(() => {
+    const saved = localStorage.getItem('tindahan_cloud_stats');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch {
+        // fallback
+      }
+    }
+    return {
+      day: emptyStatsBucket(),
+      week: emptyStatsBucket(),
+      month: emptyStatsBucket(),
+      year: emptyStatsBucket()
+    };
   });
+  const [statsPeriod, setStatsPeriod] = useState('day');
+
+  useEffect(() => {
+    localStorage.setItem('tindahan_cloud_stats', JSON.stringify(cloudStats));
+  }, [cloudStats]);
+
+  const updateLocalStatsBuckets = (deltaSales, deltaProfit, deltaPuhunan, deltaService) => {
+    setCloudStats((prev) => {
+      const next = { ...prev };
+      ['day', 'week', 'month', 'year'].forEach((key) => {
+        const cur = prev[key] || emptyStatsBucket();
+        next[key] = {
+          sales: Math.max(0, cur.sales + deltaSales),
+          profit: cur.profit + deltaProfit,
+          puhunan: Math.max(0, cur.puhunan + deltaPuhunan),
+          serviceProfit: Math.max(0, (cur.serviceProfit || 0) + deltaService)
+        };
+      });
+      return next;
+    });
+  };
 
   const [serviceLogs, setServiceLogs] = useState(() => {
     const saved = localStorage.getItem('tindahan_service_logs');
     return saved ? JSON.parse(saved) : [];
   });
 
-  // Bantay Bote (Softdrinks / Beer Glass Bottle Tracker)
+  // Bantay Bote
   const [boteData, setBoteData] = useState(() => {
     const saved = localStorage.getItem('tindahan_bote');
     return saved
       ? JSON.parse(saved)
-      : { totalOwned: 48, borrowedList: [] }; // 48 pcs = 2 cases default
+      : { totalOwned: 48, borrowedList: [] };
   });
   const [boteCustomer, setBoteCustomer] = useState('');
   const [boteBrand, setBoteBrand] = useState('Softdrinks (Mismo/Kasalo)');
@@ -178,39 +208,17 @@ const App = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [lastSaleBackup, setLastSaleBackup] = useState(null);
   const undoTimerRef = useRef(null);
+  
   const [editingPriceId, setEditingPriceId] = useState(null);
   const [tempQuickPrice, setTempQuickPrice] = useState('');
-  const handleSaveQuickPrice = (item) => {
-    const newP = parseFloat(tempQuickPrice);
-    if (!newP || newP <= 0) {
-      playBeep('error');
-      return showMessage('Ilagay ang tamang bagong presyo.', 'error');
-    }
-
-    const updatedInv = inventory.map((inv) => {
-      if (inv.id !== item.id) return inv;
-      const updatedBatches = (inv.batches || []).map((b) => ({ ...b, price: newP }));
-      return normalizeItem({
-        ...inv,
-        price: newP,
-        batches: updatedBatches
-      });
-    });
-
-    setInventory(updatedInv);
-    setEditingPriceId(null);
-    setTempQuickPrice('');
-    playBeep('success');
-    syncToSheets('syncInventory', { inventory: updatedInv });
-    showMessage(`Na-update ang presyo ng ${item.name} sa ₱${newP.toFixed(2)}!`, 'success');
-  };
 
   // GCash / Bank States
-  const [gcashType, setGcashType] = useState('CASH-IN'); // 'CASH-IN' | 'CASH-OUT'
+  const [gcashType, setGcashType] = useState('CASH-IN');
   const [gcashAmount, setGcashAmount] = useState('');
   const [gcashFee, setGcashFee] = useState('');
 
-  // Printing Custom States
+  // Printing Custom States & Bond Paper Link
+  const [printPaperSize, setPrintPaperSize] = useState('SHORT');
   const [customPrintName, setCustomPrintName] = useState('Print / Scan');
   const [customPrintQty, setCustomPrintQty] = useState('1');
   const [customPrintPrice, setCustomPrintPrice] = useState('');
@@ -243,7 +251,6 @@ const App = () => {
   const processScanRef = useRef(null);
   const cartSectionRef = useRef(null);
 
-  // Save to localStorage automatically
   useEffect(() => {
     localStorage.setItem('tindahan_inventory', JSON.stringify(inventory));
   }, [inventory]);
@@ -253,16 +260,9 @@ const App = () => {
   }, [utangList]);
 
   useEffect(() => {
-    localStorage.setItem('tindahan_stats', JSON.stringify(dailyStats));
-  }, [dailyStats]);
-
-  useEffect(() => {
     localStorage.setItem('tindahan_service_logs', JSON.stringify(serviceLogs));
   }, [serviceLogs]);
 
-  // ==========================================
-  // 🔊 AUDIO FEEDBACK (BEEP)
-  // ==========================================
   const playBeep = useCallback(
     (type = 'success') => {
       if (navigator.vibrate) {
@@ -288,7 +288,6 @@ const App = () => {
           osc.stop(ctx.currentTime + 0.3);
         }
       } catch {
-        // Ignore audio restrictions
       }
     },
     [soundEnabled]
@@ -300,9 +299,6 @@ const App = () => {
     toastTimerRef.current = setTimeout(() => setMessage(null), 4000);
   }, []);
 
-  // ==========================================
-  // 🔄 GOOGLE SHEETS SYNC + OFFLINE QUEUE
-  // ==========================================
   const flushOfflineQueue = useCallback(async () => {
     if (!SCRIPT_URL) return true;
     const savedQueue = JSON.parse(localStorage.getItem('tindahan_offline_queue') || '[]');
@@ -322,12 +318,11 @@ const App = () => {
     }
   }, []);
 
-const pullFromSheets = useCallback(
+  const pullFromSheets = useCallback(
     async (forceFromSheet = false) => {
       if (!SCRIPT_URL) return;
       setSyncStatus('Naglo-load...');
 
-      // Kung pinindot mismo ang "I-Sync" button (strictly true), huwag hayaang i-overwrite ng lumang offline queue ang Google Sheet
       if (forceFromSheet === true) {
         localStorage.removeItem('tindahan_offline_queue');
       } else {
@@ -336,7 +331,6 @@ const pullFromSheets = useCallback(
       }
 
       try {
-        // Ang &t=${Date.now()} ay pumipigil sa browser na ibalik ang lumang cached data
         const res = await fetch(`${SCRIPT_URL}?action=getData&t=${Date.now()}`, {
           cache: 'no-store'
         });
@@ -349,6 +343,9 @@ const pullFromSheets = useCallback(
         }
         if (data.boteData) {
           setBoteData(data.boteData);
+        }
+        if (data.stats) {
+          setCloudStats(data.stats);
         }
         setSyncStatus('🟢');
       } catch {
@@ -364,7 +361,7 @@ const pullFromSheets = useCallback(
     return () => window.removeEventListener('online', pullFromSheets);
   }, [pullFromSheets]);
 
-const syncToSheets = async (action, payload) => {
+  const syncToSheets = async (action, payload) => {
     if (!SCRIPT_URL) return;
     const eventRecord = { action, timestamp: new Date().toISOString(), ...payload };
 
@@ -378,7 +375,6 @@ const syncToSheets = async (action, payload) => {
       });
       const data = await res.json();
 
-      // Sync Merged data from devices
       if (data && data.status === 'success') {
         if (Array.isArray(data.inventory)) {
           setInventory(data.inventory.map(normalizeItem));
@@ -388,6 +384,9 @@ const syncToSheets = async (action, payload) => {
         }
         if (data.boteData) {
           setBoteData(data.boteData);
+        }
+        if (data.stats) {
+          setCloudStats(data.stats);
         }
       }
 
@@ -401,9 +400,6 @@ const syncToSheets = async (action, payload) => {
     }
   };
 
-  // ==========================================
-  // 🛒 CART & BARCODE FUNCTIONS
-  // ==========================================
   const addToCart = useCallback(
     (item) => {
       if (!item.isService && item.qty <= 0) {
@@ -499,7 +495,7 @@ const syncToSheets = async (action, payload) => {
             barcode,
             name: scannedItem ? scannedItem.name : prev.name,
             qty: String(nextQty),
-            costMode: 'unit', // Naka-lock ang Puhunan/pc!
+            costMode: 'unit',
             unitCost: activeUnitCost > 0 ? activeUnitCost.toFixed(2) : prev.unitCost,
             packCost:
               activeUnitCost > 0
@@ -519,7 +515,6 @@ const syncToSheets = async (action, payload) => {
     [activeTab, inventory, addToCart, playBeep, showMessage]
   );
 
-  // ⭐ 
   const toggleFavorite = (itemId) => {
     const updatedInv = inventory.map((item) =>
       item.id === itemId ? { ...item, isFavorite: !item.isFavorite } : item
@@ -528,7 +523,31 @@ const syncToSheets = async (action, payload) => {
     syncToSheets('syncInventory', { inventory: updatedInv });
   };
 
-  // ✂️ Buksan ang 1 Pack para gawing Tingi
+  const handleSaveQuickPrice = (item) => {
+    const newP = parseFloat(tempQuickPrice);
+    if (!newP || newP <= 0) {
+      playBeep('error');
+      return showMessage('Ilagay ang tamang bagong presyo.', 'error');
+    }
+
+    const updatedInv = inventory.map((inv) => {
+      if (inv.id !== item.id) return inv;
+      const updatedBatches = (inv.batches || []).map((b) => ({ ...b, price: newP }));
+      return normalizeItem({
+        ...inv,
+        price: newP,
+        batches: updatedBatches
+      });
+    });
+
+    setInventory(updatedInv);
+    setEditingPriceId(null);
+    setTempQuickPrice('');
+    playBeep('success');
+    syncToSheets('syncInventory', { inventory: updatedInv });
+    showMessage(`Na-update ang presyo ng ${item.name} sa ₱${newP.toFixed(2)}!`, 'success');
+  };
+
   const openBreakPackModal = (packItem) => {
     setBreakPackItem(packItem);
     setBreakPackPcs('');
@@ -539,7 +558,6 @@ const syncToSheets = async (action, payload) => {
     setBreakPackPcs(val);
     const pcs = parseInt(val, 10);
     if (breakPackItem && pcs > 1) {
-      // Auto-suggest: (Presyo ng Pack / piraso) + ₱1 patong sa pagbubukas, rounded up sa buong piso
       const suggested = Math.ceil(breakPackItem.price / pcs + 0.5);
       setBreakPackPrice(String(suggested));
     } else {
@@ -565,7 +583,6 @@ const syncToSheets = async (action, payload) => {
       return showMessage(`Ubos na ang stock ng ${breakPackItem.name}!`, 'error');
     }
 
-    // 1. Bawasan ng 1 pack ang Pack Item (gamit ang FIFO batch)
     let packCostUsed = breakPackItem.cost || 0;
     let packExpiryUsed = '';
     const updatedBatchesForPack = [];
@@ -600,7 +617,6 @@ const syncToSheets = async (action, payload) => {
       });
     });
 
-    // 2. Idagdag ang (pcsPerPack) sa Tingi Item at markahan bilang ⭐ Favorite
     if (existingTingiIndex >= 0) {
       const existingTingi = updatedInv[existingTingiIndex];
       const newTingiBatches = [
@@ -639,7 +655,6 @@ const syncToSheets = async (action, payload) => {
 
     setInventory(updatedInv);
 
-    // 3. Ilagay agad ang 1 piraso ng Tingi sa Basket ng customer
     setCart((prev) => {
       const existingInCart = prev.find((i) => i.id === targetTingiItem.id);
       if (existingInCart) {
@@ -668,7 +683,6 @@ const syncToSheets = async (action, payload) => {
     setSearchQuery('');
   };
 
-  // Keep latest scan handler in a ref so the camera loop never uses stale inventory/cart state
   useEffect(() => {
     processScanRef.current = processBarcodeScan;
   }, [processBarcodeScan]);
@@ -686,9 +700,13 @@ const syncToSheets = async (action, payload) => {
     setLastScannedText('');
   }, []);
 
+  // Auto-off camera pag lumipat ng tab
+  useEffect(() => {
+    stopCamera();
+  }, [activeTab, stopCamera]);
+
   const startCamera = useCallback(async () => {
     try {
-      // Load BarcodeDetector polyfill automatically for iOS Safari / older browsers
       if (!('BarcodeDetector' in window)) {
         const mod = await import(
           /* @vite-ignore */ 'https://fastly.jsdelivr.net/npm/barcode-detector@2/dist/es/pure.min.js'
@@ -719,7 +737,6 @@ const syncToSheets = async (action, payload) => {
         }
       }, 100);
 
-      // Continuously check camera frames every 250ms
       scanIntervalRef.current = setInterval(async () => {
         if (!videoRef.current || videoRef.current.readyState < 2) return;
         try {
@@ -729,7 +746,6 @@ const syncToSheets = async (action, payload) => {
             if (!rawCode) return;
 
             const now = Date.now();
-            // 2-second cooldown for the exact same barcode to prevent accidental double scans
             if (
               lastCameraScanRef.current.code === rawCode &&
               now - lastCameraScanRef.current.time < 2000
@@ -745,7 +761,6 @@ const syncToSheets = async (action, payload) => {
             }
           }
         } catch {
-          // Ignore single-frame decode errors
         }
       }, 250);
     } catch {
@@ -758,12 +773,10 @@ const syncToSheets = async (action, payload) => {
     }
   }, [playBeep, showMessage, stopCamera]);
 
-  // Clean up camera if user leaves the page
   useEffect(() => {
     return () => stopCamera();
   }, [stopCamera]);
 
-  // Global Hardware Scanner Listener
   useEffect(() => {
     const handleGlobalKeyDown = (e) => {
       const tag = document.activeElement?.tagName;
@@ -816,9 +829,6 @@ const syncToSheets = async (action, payload) => {
     );
   };
 
-  // ==========================================
-  // 📱 GCASH / BANK / E-LOAD & 🖨️ PRINT HANDLERS
-  // ==========================================
   const selectGcashMode = (mode) => {
     setGcashType(mode);
     const num = parseFloat(gcashAmount);
@@ -838,10 +848,8 @@ const syncToSheets = async (action, payload) => {
     const num = parseFloat(val);
     if (num > 0) {
       if (gcashType === 'E-LOAD') {
-        // Fixed +₱5 patong for all E-Load amounts
         setGcashFee('5');
       } else {
-        // Standard Sari-Sari Store Bracket: ₱10 fee per ₱500
         const suggestedFee = Math.max(5, Math.ceil(num / 500) * 10);
         setGcashFee(String(suggestedFee));
       }
@@ -867,12 +875,7 @@ const syncToSheets = async (action, payload) => {
       time: new Date().toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' })
     };
 
-    setDailyStats((prev) => ({
-      ...prev,
-      sales: prev.sales + fee,
-      profit: prev.profit + fee,
-      serviceProfit: (prev.serviceProfit || 0) + fee
-    }));
+    updateLocalStatsBuckets(fee, fee, 0, fee);
 
     setServiceLogs((prev) => [logEntry, ...prev.slice(0, 29)]);
     syncToSheets('recordService', {
@@ -892,13 +895,28 @@ const syncToSheets = async (action, payload) => {
     setActiveDrawer(null);
   };
 
+  const findBondPaperItem = useCallback(
+    (size) => {
+      if (!size || size === 'NONE') return null;
+      const sizeKey = size.toLowerCase();
+      return inventory.find((i) => {
+        const n = i.name.toLowerCase();
+        const isPaper = n.includes('bond') || n.includes('paper') || n.includes('papel');
+        return isPaper && n.includes(sizeKey);
+      });
+    },
+    [inventory]
+  );
+
   const handleAddPrintPreset = (preset) => {
+    const sizeLabel = printPaperSize === 'NONE' ? 'Walang Papel' : printPaperSize;
     addToCart({
-      id: `PRINT-${preset.label}`,
-      name: `🖨️ ${preset.label}`,
+      id: `PRINT-${preset.label}-${printPaperSize}`,
+      name: `🖨️ ${preset.label} (${sizeLabel})`,
       price: preset.price,
       cost: 0,
       isService: true,
+      paperSize: printPaperSize,
       addQty: 1
     });
   };
@@ -910,42 +928,59 @@ const syncToSheets = async (action, payload) => {
       playBeep('error');
       return showMessage('Ilagay ang presyo kada pahina/piraso.', 'error');
     }
+    const sizeLabel = printPaperSize === 'NONE' ? 'Walang Papel' : printPaperSize;
     addToCart({
-      id: `PRINT-CUSTOM-${price}-${customPrintName}`,
-      name: `🖨️ ${customPrintName.trim() || 'Print/Xerox'}`,
+      id: `PRINT-CUSTOM-${price}-${customPrintName}-${printPaperSize}`,
+      name: `🖨️ ${customPrintName.trim() || 'Print/Xerox'} (${sizeLabel})`,
       price: price,
       cost: 0,
       isService: true,
+      paperSize: printPaperSize,
       addQty: qty
     });
     setCustomPrintQty('1');
     setCustomPrintPrice('');
   };
 
-  // ==========================================
-  // 💳 CHECKOUT (GROCERIES + PRINT SERVICES)
-  // ==========================================
   const deductCartFromInventory = () => {
     let saleTotal = 0;
     let totalCost = 0;
     let serviceRevenue = 0;
     const priceDropAlerts = [];
 
-    cart
-      .filter((c) => c.isService)
-      .forEach((serviceItem) => {
-        const rev = serviceItem.price * serviceItem.cartQty;
+    const deductionsById = {};
+    const printPaperDeductions = {};
+
+    cart.forEach((c) => {
+      if (c.isService) {
+        const rev = c.price * c.cartQty;
         saleTotal += rev;
         serviceRevenue += rev;
-      });
+
+        if (c.paperSize && c.paperSize !== 'NONE') {
+          const matchedPaper = findBondPaperItem(c.paperSize);
+          if (matchedPaper) {
+            deductionsById[matchedPaper.id] =
+              (deductionsById[matchedPaper.id] || 0) + c.cartQty;
+            printPaperDeductions[matchedPaper.id] =
+              (printPaperDeductions[matchedPaper.id] || 0) + c.cartQty;
+          }
+        }
+      } else {
+        const invItem = inventory.find((i) => i.id === c.id);
+        if (invItem) {
+          saleTotal += invItem.price * c.cartQty;
+          deductionsById[invItem.id] = (deductionsById[invItem.id] || 0) + c.cartQty;
+        }
+      }
+    });
 
     const updatedInventory = inventory.map((invItem) => {
-      const cartItem = cart.find((c) => !c.isService && c.id === invItem.id);
-      if (!cartItem) return invItem;
+      let remainingToDeduct = deductionsById[invItem.id] || 0;
+      if (remainingToDeduct <= 0) return invItem;
 
-      let remainingToDeduct = cartItem.cartQty;
       const oldPrice = invItem.price;
-      saleTotal += oldPrice * cartItem.cartQty;
+      let itemCostIncurred = 0;
 
       const updatedBatches = [];
       for (const batch of invItem.batches) {
@@ -954,11 +989,18 @@ const syncToSheets = async (action, payload) => {
           continue;
         }
         const take = Math.min(batch.qty, remainingToDeduct);
-        totalCost += take * batch.cost;
+        itemCostIncurred += take * batch.cost;
         remainingToDeduct -= take;
         if (batch.qty - take > 0) {
           updatedBatches.push({ ...batch, qty: batch.qty - take });
         }
+      }
+
+      totalCost += itemCostIncurred;
+
+      if (printPaperDeductions[invItem.id]) {
+        const paperRatio = printPaperDeductions[invItem.id] / (deductionsById[invItem.id] || 1);
+        serviceRevenue = Math.max(0, serviceRevenue - itemCostIncurred * paperRatio);
       }
 
       const normalized = normalizeItem({
@@ -1008,7 +1050,6 @@ const syncToSheets = async (action, payload) => {
         ? `${baseSummary} [Discount: -₱${appliedDiscount.toFixed(2)}]`
         : baseSummary;
 
-      // I-save para sa 1-Minute Undo Backup
     setLastSaleBackup({
       cartItems: cart,
       inventory: inventory, 
@@ -1018,9 +1059,9 @@ const syncToSheets = async (action, payload) => {
       serviceRevenue
     });
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
-    undoTimerRef.current = setTimeout(() => setLastSaleBackup(null), 60000); // Mawawala pagkalipas ng 1 minuto
+    undoTimerRef.current = setTimeout(() => setLastSaleBackup(null), 60000);
 
-      setInventory(updatedInventory);
+    setInventory(updatedInventory);
 
     if (isUtang) {
       const trimmedCustomer = utangCustomer.trim();
@@ -1030,7 +1071,6 @@ const syncToSheets = async (action, payload) => {
 
       let updatedUtang = [];
       if (existingUtangIndex >= 0) {
-        // Kung may utang na siya dati, pagsamahin ang balot, halaga, at items!
         const prevU = utangList[existingUtangIndex];
         const mergedRecord = {
           ...prevU,
@@ -1047,7 +1087,7 @@ const syncToSheets = async (action, payload) => {
           })
         };
         updatedUtang = utangList.map((u, idx) =>
-          idx === existingIndex ? mergedRecord : u
+          idx === existingUtangIndex ? mergedRecord : u
         );
       } else {
         const newUtangRecord = {
@@ -1079,12 +1119,7 @@ const syncToSheets = async (action, payload) => {
         'success'
       );
     } else {
-      setDailyStats((prev) => ({
-        sales: prev.sales + saleTotal,
-        profit: prev.profit + profitTotal,
-        puhunan: prev.puhunan + totalCost,
-        serviceProfit: (prev.serviceProfit || 0) + serviceRevenue
-      }));
+      updateLocalStatsBuckets(saleTotal, profitTotal, totalCost, serviceRevenue);
 
       if (serviceRevenue > 0) {
         const printSummary = cart
@@ -1106,7 +1141,6 @@ const syncToSheets = async (action, payload) => {
         ]);
       }
 
-      // Kung may discount, isama sa pangalan ng huling item sa log para makita sa Sheet Ledger
       const ledgerItems =
         appliedDiscount > 0 && cart.length > 0
           ? cart.map((item, idx) =>
@@ -1139,6 +1173,7 @@ const syncToSheets = async (action, payload) => {
     }
 
     playBeep('success');
+    stopCamera();
     setCart([]);
     setCashTendered('');
     setDiscountAmount('');
@@ -1151,15 +1186,14 @@ const syncToSheets = async (action, payload) => {
     if (!lastSaleBackup) return;
     if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
 
-    // Ibalik ang inventory at ibalik ang cart items para ma-edit pa
     setInventory(lastSaleBackup.inventory);
     setCart(lastSaleBackup.cartItems);
-    setDailyStats((prev) => ({
-      sales: prev.sales - lastSaleBackup.saleTotal,
-      profit: prev.profit - lastSaleBackup.profitTotal,
-      puhunan: prev.puhunan - lastSaleBackup.totalCost,
-      serviceProfit: (prev.serviceProfit || 0) - lastSaleBackup.serviceRevenue
-    }));
+    updateLocalStatsBuckets(
+      -lastSaleBackup.saleTotal,
+      -lastSaleBackup.profitTotal,
+      -lastSaleBackup.totalCost,
+      -lastSaleBackup.serviceRevenue
+    );
 
     setLastSaleBackup(null);
     playBeep('success');
@@ -1193,6 +1227,7 @@ const syncToSheets = async (action, payload) => {
       );
     }
 
+    stopCamera();
     setCart([]);
     setCashTendered('');
     setUtangCustomer('');
@@ -1202,12 +1237,7 @@ const syncToSheets = async (action, payload) => {
   const markUtangPaid = (record) => {
     const updatedUtang = utangList.filter((u) => u.id !== record.id);
     setUtangList(updatedUtang);
-    setDailyStats((prev) => ({
-      sales: prev.sales + record.amount,
-      profit: prev.profit + record.profit,
-      puhunan: prev.puhunan + record.cost,
-      serviceProfit: (prev.serviceProfit || 0) + (record.serviceRevenue || 0)
-    }));
+    updateLocalStatsBuckets(record.amount, record.profit, record.cost, record.serviceRevenue || 0);
     setActiveHulogId(null);
     setHulogAmount('');
     playBeep('success');
@@ -1225,12 +1255,10 @@ const syncToSheets = async (action, payload) => {
       return showMessage('Ilagay kung magkano ang ihuhulog na bayad.', 'error');
     }
 
-    // If they pay the full amount (or more), treat it as full payment
     if (paid >= record.amount) {
       return markUtangPaid(record);
     }
 
-    // Proportional split so Puhunan, Tubo, and Service Profit stay 100% accurate
     const ratio = paid / record.amount;
     const paidCost = record.cost * ratio;
     const paidProfit = record.profit * ratio;
@@ -1251,14 +1279,8 @@ const syncToSheets = async (action, payload) => {
     );
 
     setUtangList(updatedUtang);
-    setDailyStats((prev) => ({
-      sales: prev.sales + paid,
-      profit: prev.profit + paidProfit,
-      puhunan: prev.puhunan + paidCost,
-      serviceProfit: (prev.serviceProfit || 0) + paidService
-    }));
+    updateLocalStatsBuckets(paid, paidProfit, paidCost, paidService);
 
-    // Sends partial payment to Google Sheets Ledger under 'BAYAD UTANG'
     const ledgerPartialRecord = {
       customer: `${record.customer} (HULOG)`,
       amount: paid,
@@ -1280,9 +1302,6 @@ const syncToSheets = async (action, payload) => {
     setHulogAmount('');
   };
 
-  // ==========================================
-  // 🍾 BANTAY BOTE (DEPOSIT & BORROW TRACKER)
-  // ==========================================
   const adjustTotalBote = (change) => {
     const updatedBote = {
       ...boteData,
@@ -1352,9 +1371,6 @@ const syncToSheets = async (action, payload) => {
     );
   };
 
-  // ==========================================
-  // 📦 TAB 2: DAGDAG STOCK & TUBO CALCULATOR
-  // ==========================================
   const unitCostPreview =
     parseFloat(newStock.unitCost) > 0
       ? parseFloat(newStock.unitCost)
@@ -1362,7 +1378,6 @@ const syncToSheets = async (action, payload) => {
       ? parseFloat(newStock.packCost) / parseInt(newStock.qty, 10)
       : 0;
 
-// Kapag binago ang Ilang Piraso: Kung 'unit' mode (default), NAKA-LOCK ang Puhunan/pc!
   const handleQtyChange = (val) => {
     const qtyNum = parseInt(val, 10);
     setNewStock((prev) => {
@@ -1370,17 +1385,14 @@ const syncToSheets = async (action, payload) => {
       let nextPack = prev.packCost;
 
       if (prev.costMode === 'pack' && qtyNum > 0 && parseFloat(prev.packCost) > 0) {
-        // Nag-type muna sa Puhunan Pack bago naglagay ng Piraso (hal. bagong bili na pack)
         nextUnit = (parseFloat(prev.packCost) / qtyNum).toFixed(2);
       } else if (qtyNum > 0 && parseFloat(prev.unitCost) > 0) {
-        // Naka-lock ang Puhunan/pc! Ang Pack Cost lang ang mag-a-adjust
         nextPack = (parseFloat(prev.unitCost) * qtyNum).toFixed(2);
       }
       return { ...prev, qty: val, unitCost: nextUnit, packCost: nextPack };
     });
   };
 
-  // Kapag nag-type sa 4A (Puhunan Pack), tsaka lang siya magdi-divide sa bilang ng piraso
   const handlePackCostChange = (val) => {
     const packNum = parseFloat(val);
     const qtyNum = parseInt(newStock.qty, 10);
@@ -1395,7 +1407,6 @@ const syncToSheets = async (action, payload) => {
     }));
   };
 
-  // Kapag nag-type sa 4B (Puhunan/pc), i-lock ang Puhunan/pc
   const handleUnitCostChange = (val) => {
     const unitNum = parseFloat(val);
     const qtyNum = parseInt(newStock.qty, 10);
@@ -1410,7 +1421,6 @@ const syncToSheets = async (action, payload) => {
     }));
   };
 
-  // Pumili ng paninda mula sa Search Dropdown sa Tab 2 (Naka-lock ang Puhunan/pc)
   const selectStockSuggestion = (item) => {
     const isSameItem =
       newStock.barcode === item.barcode &&
@@ -1440,7 +1450,6 @@ const syncToSheets = async (action, payload) => {
     playBeep('success');
   };
 
-  // Mabilisang dagdag sa Ilang Piraso (+1, +6, +8, +10, +12, +24) — Laging naka-lock ang Puhunan/pc!
   const addQuickStockQty = (addAmount) => {
     setNewStock((prev) => {
       const currentQty = parseInt(prev.qty, 10) || 0;
@@ -1458,7 +1467,6 @@ const syncToSheets = async (action, payload) => {
     });
   };
 
-  // Auto-format sa MM/YY habang nagta-type (hal. "1126" -> "11/26")
   const handleExpiryMMYYChange = (rawVal) => {
     const digits = rawVal.replace(/\D/g, '').slice(0, 4);
     let formatted = digits;
@@ -1655,9 +1663,6 @@ const syncToSheets = async (action, payload) => {
     showMessage(`Binura na sa inventory ang "${item.name}".`, 'success');
   };
 
-  // ==========================================
-  // 🎨 COMPUTED VALUES FOR RENDER
-  // ==========================================
   const cartSubtotal = cart.reduce((sum, item) => sum + item.price * item.cartQty, 0);
   const cartCostTotal = cart.reduce((sum, cartItem) => {
     if (cartItem.isService) return sum;
@@ -1675,7 +1680,6 @@ const syncToSheets = async (action, payload) => {
   const sukliAmount =
     parseFloat(cashTendered) >= cartTotal ? parseFloat(cashTendered) - cartTotal : null;
 
-  // Compute Tanggal-Butal (Round down to nearest ₱5 or ₱10)
   const butalTo5 = cartSubtotal > 5 ? Number((cartSubtotal % 5).toFixed(2)) : 0;
   const butalTo10 = cartSubtotal > 10 ? Number((cartSubtotal % 10).toFixed(2)) : 0;
 
@@ -1695,13 +1699,9 @@ const syncToSheets = async (action, payload) => {
         .slice(0, 8)
     : [];
 
-  // ⭐ Mga naka-Favorite 
   const noBarcodeItems = inventory.filter((i) => i.isFavorite);
-
-  // Out of Stock
   const lowStockItems = inventory.filter((item) => item.qty === 0);
 
-  // 📅 MM/YY Expiration Checker (Mag-e-expire ngayong buwan, susunod na buwan, o expired na)
   const expiringBatches = inventory.flatMap((item) =>
     (item.batches || [])
       .map((batch, batchIndex) => {
@@ -1716,7 +1716,7 @@ const syncToSheets = async (action, payload) => {
         const currentYear = now.getFullYear();
 
         const monthsLeft = (expYear - currentYear) * 12 + (expMonth - currentMonth);
-        if (monthsLeft > 1) return null; // Ipakita lang kung 1 buwan o mas mababa na lang
+        if (monthsLeft > 1) return null; 
 
         return {
           itemId: item.id,
@@ -1726,11 +1726,12 @@ const syncToSheets = async (action, payload) => {
           cost: batch.cost,
           price: batch.price,
           expiryDate: batch.expiryDate,
-          daysLeft: monthsLeft // <= 0 means ngayong buwan o lampas na
+          daysLeft: monthsLeft 
         };
       })
       .filter(Boolean)
   );
+
   const matchedExistingStock = inventory.find(
     (i) =>
       (newStock.barcode.trim() && i.barcode === newStock.barcode.trim()) ||
@@ -1743,7 +1744,6 @@ const syncToSheets = async (action, payload) => {
 
   return (
     <div className="min-h-screen bg-gray-100 font-sans pb-28 sm:pb-20">
-      {/* COMPACT MOBILE-FRIENDLY HEADER */}
       <header className="bg-emerald-700 text-white shadow-md sticky top-0 z-50">
         <div className="max-w-6xl mx-auto px-3 py-2 sm:p-4 flex justify-between items-center gap-2">
           <div className="min-w-0">
@@ -1783,7 +1783,6 @@ const syncToSheets = async (action, payload) => {
           </div>
         </div>
 
-        {/* 3 SIDE-BY-SIDE TABS (NEVER STACKS VERTICALLY ON MOBILE) */}
         <div className="grid grid-cols-3 max-w-6xl mx-auto border-t border-emerald-600/60">
           <button
             onClick={() => setActiveTab('sell')}
@@ -1821,7 +1820,6 @@ const syncToSheets = async (action, payload) => {
         </div>
       </header>
 
-      {/* FLOATING TOAST ALERT */}
       {message && (
         <div
           className={`fixed top-28 sm:top-36 left-1/2 transform -translate-x-1/2 px-5 py-3 sm:px-8 sm:py-4 rounded-2xl shadow-2xl z-50 text-base sm:text-2xl font-black text-white text-center transition-all w-[92%] max-w-xl ${
@@ -1832,7 +1830,6 @@ const syncToSheets = async (action, payload) => {
         </div>
       )}
 
-      {/* 1-MINUTE UNDO BANNER */}
       {lastSaleBackup && (
         <div className="max-w-6xl mx-auto mt-3 px-3 sm:px-4">
           <div className="bg-amber-100 border-2 border-amber-400 p-3 rounded-2xl flex justify-between items-center shadow-md">
@@ -1842,9 +1839,9 @@ const syncToSheets = async (action, payload) => {
             <button
               type="button"
               onClick={handleUndoLastSale}
-              className="bg-amber-600 hover:bg-amber-700 text-white px-3.5 py-2 rounded-xl font-black text-xs sm:text-sm shadow active:scale-95 transition"
+              className="bg-amber-600 hover:bg-amber-700 text-white px-3.5 py-2 rounded-xl font-black text-xs sm:text-sm shadow active:scale-95 transition shrink-0 ml-2"
             >
-              ↩️ Bawiin ang Benta
+              ↩️ Bawiin
             </button>
           </div>
         </div>
@@ -1854,38 +1851,30 @@ const syncToSheets = async (action, payload) => {
         {/* ==================== TAB 1: MAGBENTA ==================== */}
         {activeTab === 'sell' && (
           <div className="flex flex-col lg:flex-row gap-5 sm:gap-8">
-            {/* LEFT COLUMN: SEARCH + 3 QUICK DRAWERS */}
             <div className="flex-1 space-y-4 sm:space-y-5">
-              {/* SEARCH BAR + MOBILE CAMERA SCANNER */}
               <div className="bg-white p-4 sm:p-6 rounded-2xl sm:rounded-3xl shadow-md border-2 sm:border-4 border-emerald-100 space-y-3">
                 <div className="flex justify-between items-center gap-2">
                   <label className="block text-gray-800 font-black text-lg sm:text-3xl">
-                    🔍 I-scan o I-type ang Paninda:
+                    🔍 Scan or Type Here:
                   </label>
                   <button
                     type="button"
                     onClick={() => (cameraOpen ? stopCamera() : startCamera())}
-                    className={`px-3.5 py-2.5 sm:px-5 sm:py-3 rounded-xl sm:rounded-2xl font-black text-xs sm:text-lg flex items-center gap-2 shadow-sm transition shrink-0 ${
+                    title={cameraOpen ? 'Isara ang Camera' : 'Buksan ang Camera Scanner'}
+                    className={`w-11 h-11 sm:w-14 sm:h-14 rounded-xl sm:rounded-2xl flex items-center justify-center shadow-sm transition shrink-0 active:scale-95 ${
                       cameraOpen
                         ? 'bg-red-600 text-white hover:bg-red-700'
                         : 'bg-emerald-600 text-white hover:bg-emerald-700'
                     }`}
                   >
                     {cameraOpen ? (
-                      <>
-                        <CameraOff className="w-5 h-5 sm:w-6 sm:h-6" />
-                        <span></span>
-                      </>
+                      <CameraOff className="w-5 h-5 sm:w-7 sm:h-7" />
                     ) : (
-                      <>
-                        <Camera className="w-5 h-5 sm:w-6 sm:h-6" />
-                        <span></span>
-                      </>
+                      <Camera className="w-5 h-5 sm:w-7 sm:h-7" />
                     )}
                   </button>
                 </div>
 
-                {/* LIVE CAMERA VIEWFINDER (CONTINUOUS SCANNING) */}
                 {cameraOpen && (
                   <div className="relative rounded-2xl overflow-hidden bg-black border-4 border-emerald-500 shadow-inner">
                     <video
@@ -1894,12 +1883,11 @@ const syncToSheets = async (action, payload) => {
                       muted
                       className="w-full h-52 sm:h-64 object-cover"
                     />
-                    {/* Green Target Box Overlay */}
                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                       <div className="w-3/4 h-24 border-4 border-emerald-400 rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]" />
                     </div>
                     <div className="bg-gray-900/90 text-white px-4 py-2.5 flex justify-between items-center text-xs sm:text-base font-bold">
-                      <span>🟢 Itapat ang barcode sa berdeng kahon (Tuloy-tuloy ang scan)</span>
+                      <span>🟢 Itapat ang barcode sa berdeng kahon</span>
                       {lastScannedText && (
                         <span className="bg-emerald-600 px-2.5 py-1 rounded-lg font-black">
                           ✓ {lastScannedText}
@@ -1930,47 +1918,48 @@ const syncToSheets = async (action, payload) => {
                 </div>
               </div>
 
-              {/* SEARCH RESULTS: ONLY SHOWN WHEN TYPING */}
               {searchQuery && (
-                <div className="bg-white rounded-2xl sm:rounded-3xl shadow-lg border-2 border-gray-200 overflow-hidden">
+                <div className="bg-white rounded-2xl sm:rounded-3xl shadow-lg border-2 border-gray-200 overflow-hidden divide-y-2 divide-gray-100">
                   {filteredInventory.length > 0 ? (
                     filteredInventory.map((item) => (
                       <div
                         key={item.id}
-                        className="p-4 sm:p-6 border-b-2 border-gray-100 space-y-3 bg-white hover:bg-emerald-50/40"
+                        className="p-4 sm:p-5 space-y-3 bg-white hover:bg-emerald-50/40 transition"
                       >
-                        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 sm:gap-4">
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={() => toggleFavorite(item.id)}
-                                title="Ilagay o alisin sa Tingi / Paborito"
-                                className={`p-1.5 rounded-xl border-2 transition ${
-                                  item.isFavorite
-                                    ? 'bg-amber-400 text-white border-amber-500'
-                                    : 'bg-gray-100 text-gray-400 border-gray-200 hover:text-amber-500'
-                                }`}
-                              >
-                                <Star className="w-5 h-5 fill-current" />
-                              </button>
-                              <h3 className="text-xl sm:text-3xl font-black text-gray-800">
+                        <div className="flex justify-between items-start gap-3">
+                          <div className="flex items-start gap-2.5 min-w-0 flex-1">
+                            <button
+                              type="button"
+                              onClick={() => toggleFavorite(item.id)}
+                              title="Ilagay o alisin sa Paborito"
+                              className={`mt-0.5 p-2 rounded-xl border-2 shrink-0 transition ${
+                                item.isFavorite
+                                  ? 'bg-amber-400 text-white border-amber-500'
+                                  : 'bg-gray-100 text-gray-400 border-gray-200 hover:text-amber-500'
+                              }`}
+                            >
+                              <Star className="w-4 h-4 sm:w-5 sm:h-5 fill-current" />
+                            </button>
+
+                            <div className="min-w-0">
+                              <h3 className="text-lg sm:text-2xl font-black text-gray-900 leading-snug break-words">
                                 {item.name}
                               </h3>
+                              <p className="text-gray-500 text-xs sm:text-base mt-1 font-bold flex flex-wrap items-center gap-1.5">
+                                <Package className="w-4 h-4 sm:w-5 sm:h-5 shrink-0" />
+                                <span>Stock: {item.qty} pcs</span>
+                                {item.batches && item.batches.length > 1 && (
+                                  <span className="text-amber-600">
+                                    ({item.batches[0].qty} pcs sa lumang presyo)
+                                  </span>
+                                )}
+                              </p>
                             </div>
-                            <p className="text-gray-500 text-sm sm:text-xl mt-1 font-bold flex flex-wrap items-center gap-1.5">
-                              <Package className="w-4 h-4 sm:w-6 sm:h-6" /> Stock: {item.qty} pcs
-                              {item.batches && item.batches.length > 1 && (
-                                <span className="text-amber-600">
-                                  ({item.batches[0].qty} pcs sa lumang presyo)
-                                </span>
-                              )}
-                            </p>
                           </div>
 
-                          <div className="flex flex-col items-end gap-1">
+                          <div className="flex flex-col items-end shrink-0">
                             <div className="flex items-center gap-1.5">
-                              <span className="text-2xl sm:text-4xl font-black text-emerald-700">
+                              <span className="text-2xl sm:text-3xl font-black text-emerald-700 whitespace-nowrap">
                                 ₱{item.price.toFixed(2)}
                               </span>
                               <button
@@ -1991,57 +1980,55 @@ const syncToSheets = async (action, payload) => {
                             </div>
 
                             {editingPriceId === item.id && (
-                              <div className="flex items-center gap-1.5 bg-gray-100 p-2 rounded-xl border border-gray-300 mt-1">
+                              <div className="flex items-center gap-1.5 bg-gray-100 p-1.5 rounded-xl border border-gray-300 mt-1.5">
                                 <input
                                   type="number"
                                   value={tempQuickPrice}
                                   onChange={(e) => setTempQuickPrice(e.target.value)}
-                                  className="w-24 p-1.5 text-center font-black text-sm bg-white border rounded-lg"
-                                  placeholder="Bagong Presyo"
+                                  className="w-20 p-1 text-center font-black text-sm bg-white border rounded-lg"
+                                  placeholder="Presyo"
                                 />
                                 <button
                                   type="button"
                                   onClick={() => handleSaveQuickPrice(item)}
-                                  className="bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 py-1.5 rounded-lg text-xs font-black"
+                                  className="bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 py-1 rounded-lg text-xs font-black whitespace-nowrap"
                                 >
                                   I-save
                                 </button>
                               </div>
                             )}
-
-                            <div className="flex items-center gap-2 mt-1">
-                              {/* ✂️ BUKSAN 1 PACK BUTTON (KUNG MAY STOCK AT HINDI PA TINGI) */}
-                              {item.qty > 0 && !item.name.toLowerCase().includes('(tingi)') && (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    breakPackItem?.id === item.id
-                                      ? setBreakPackItem(null)
-                                      : openBreakPackModal(item)
-                                  }
-                                  className="bg-amber-100 hover:bg-amber-200 text-amber-900 border-2 border-amber-300 px-3 py-3 sm:px-4 sm:py-4 rounded-xl sm:rounded-2xl text-xs sm:text-base font-black flex items-center gap-1.5 active:scale-95 transition"
-                                >
-                                  <Scissors className="w-4 h-4 sm:w-5 sm:h-5" />
-                                  <span>I-tingi</span>
-                                </button>
-                              )}
-
-                              <button
-                                onClick={() => addToCart(item)}
-                                disabled={item.qty <= 0}
-                                className="bg-emerald-600 text-white px-4 py-3 sm:px-7 sm:py-4 rounded-xl sm:rounded-2xl text-base sm:text-2xl font-black hover:bg-emerald-700 disabled:bg-gray-400 shadow-md active:scale-95 transition-transform"
-                              >
-                                {item.qty > 0 ? '+ IDAGDAG' : 'UBOS NA'}
-                              </button>
-                            </div>
                           </div>
                         </div>
 
-                        {/* COLLAPSIBLE DRAWER PARA SA PAGBUKAS NG 1 PACK */}
+                        <div className="flex items-center justify-end gap-2 pt-1">
+                          {item.qty > 0 && !item.name.toLowerCase().includes('(tingi)') && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                breakPackItem?.id === item.id
+                                  ? setBreakPackItem(null)
+                                  : openBreakPackModal(item)
+                              }
+                              className="bg-amber-100 hover:bg-amber-200 text-amber-900 border-2 border-amber-300 px-3.5 py-2.5 sm:px-4 sm:py-2.5 rounded-xl text-xs sm:text-base font-black flex items-center justify-center gap-1.5 whitespace-nowrap active:scale-95 transition"
+                            >
+                              <Scissors className="w-4 h-4 shrink-0" />
+                              <span>I-tingi</span>
+                            </button>
+                          )}
+
+                          <button
+                            onClick={() => addToCart(item)}
+                            disabled={item.qty <= 0}
+                            className="flex-1 sm:flex-none bg-emerald-600 text-white px-5 py-2.5 sm:px-6 sm:py-2.5 rounded-xl text-sm sm:text-lg font-black hover:bg-emerald-700 disabled:bg-gray-400 shadow-sm whitespace-nowrap active:scale-95 transition"
+                          >
+                            {item.qty > 0 ? '+ IDAGDAG' : 'UBOS NA'}
+                          </button>
+                        </div>
+
                         {breakPackItem?.id === item.id && (
                           <div className="bg-amber-50 p-3.5 sm:p-4 rounded-2xl border-2 border-amber-400 space-y-3">
                             <div className="flex justify-between items-center">
-                              <h4 className="font-black text-amber-950 text-sm sm:text-lg">
+                              <h4 className="font-black text-amber-950 text-sm sm:text-base">
                                 ✂️ Buksan ang 1 Pack ng "{item.name}" para sa Tingi:
                               </h4>
                               <button
@@ -2090,14 +2077,14 @@ const syncToSheets = async (action, payload) => {
                                 <span className="font-black text-amber-900">
                                   {parseInt(breakPackPcs, 10) - 1} pcs
                                 </span>{' '}
-                                ay awtomatikong ilalagay sa 🥚 Tingi!
+                                ay awtomatikong ilalagay sa 🥚 Paborito!
                               </p>
                             )}
 
                             <button
                               type="button"
                               onClick={handleConfirmBreakPack}
-                              className="w-full bg-amber-600 hover:bg-amber-700 text-white py-3 rounded-xl font-black text-sm sm:text-lg shadow-md"
+                              className="w-full bg-amber-600 hover:bg-amber-700 text-white py-3 rounded-xl font-black text-sm sm:text-base shadow-md"
                             >
                               Ilagay sa Basket
                             </button>
@@ -2125,7 +2112,6 @@ const syncToSheets = async (action, payload) => {
                 </div>
               )}
 
-              {/* 3 SIDE-BY-SIDE QUICK BUTTONS ON BOTH MOBILE & DESKTOP */}
               <div className="grid grid-cols-3 gap-2 sm:gap-3">
                 <button
                   type="button"
@@ -2173,7 +2159,6 @@ const syncToSheets = async (action, payload) => {
                 </button>
               </div>
 
-              {/* DRAWER 1: WALANG BARCODE / TINGI */}
               {activeDrawer === 'tingi' && (
                 <div className="bg-white p-4 sm:p-6 rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-amber-300 shadow-lg space-y-3 sm:space-y-4">
                   <div className="flex justify-between items-center">
@@ -2218,7 +2203,6 @@ const syncToSheets = async (action, payload) => {
                 </div>
               )}
 
-              {/* DRAWER 2: GCASH / BANK & E-LOAD (+₱5 FIXED FEE) */}
               {activeDrawer === 'gcash' && (
                 <div className="bg-white p-4 sm:p-6 rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-blue-300 shadow-lg space-y-4 sm:space-y-5">
                   <div className="flex justify-between items-center">
@@ -2233,7 +2217,6 @@ const syncToSheets = async (action, payload) => {
                     </button>
                   </div>
 
-                  {/* 3 MODE BUTTONS: CASH-IN, CASH-OUT, E-LOAD */}
                   <div className="grid grid-cols-3 gap-2 sm:gap-3">
                     <button
                       type="button"
@@ -2378,7 +2361,6 @@ const syncToSheets = async (action, payload) => {
                 </div>
               )}
 
-              {/* DRAWER 3: PRINT / XEROX / SCAN SERVICES */}
               {activeDrawer === 'print' && (
                 <div className="bg-white p-4 sm:p-6 rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-purple-300 shadow-lg space-y-4 sm:space-y-5">
                   <div className="flex justify-between items-center">
@@ -2392,6 +2374,52 @@ const syncToSheets = async (action, payload) => {
                       Isara ✕
                     </button>
                   </div>
+
+                  {(() => {
+                    const matchedPaper = findBondPaperItem(printPaperSize);
+                    return (
+                      <div className="bg-purple-50/70 p-3 sm:p-3.5 rounded-2xl border-2 border-purple-200 space-y-2">
+                        <span className="block text-xs sm:text-sm font-black text-purple-900">
+                          📄 Papel na Gagamitin (Auto-bawas sa Bond Paper Stock):
+                        </span>
+                        <div className="grid grid-cols-4 gap-1.5 sm:gap-2">
+                          {[
+                            { id: 'SHORT', label: 'Short' },
+                            { id: 'A4', label: 'A4' },
+                            { id: 'LONG', label: 'Long' },
+                            { id: 'NONE', label: 'Walang Papel' }
+                          ].map((p) => (
+                            <button
+                              key={p.id}
+                              type="button"
+                              onClick={() => setPrintPaperSize(p.id)}
+                              className={`py-2 px-1.5 rounded-xl font-black text-xs sm:text-sm border-2 transition ${
+                                printPaperSize === p.id
+                                  ? 'bg-purple-600 text-white border-purple-800 shadow-sm'
+                                  : 'bg-white text-purple-900 border-purple-200 hover:bg-purple-100'
+                              }`}
+                            >
+                              {p.label}
+                            </button>
+                          ))}
+                        </div>
+                        {printPaperSize !== 'NONE' && (
+                          <p className="text-xs font-bold text-gray-600">
+                            {matchedPaper ? (
+                              <span className="text-emerald-700 font-black">
+                                ✅ Naka-konekta sa "{matchedPaper.name}" (Stock: {matchedPaper.qty} pcs)
+                              </span>
+                            ) : (
+                              <span>
+                                ℹ️ Wala pang "{printPaperSize}" bond paper sa inventory. (Kapag nag-add ka ng{' '}
+                                <strong>Bond Paper {printPaperSize}</strong> sa Tab 2, kusa na itong mababawasan).
+                              </span>
+                            )}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   <div className="grid grid-cols-2 gap-2.5 sm:gap-3">
                     {PRINT_PRESETS.map((preset) => (
@@ -2542,9 +2570,7 @@ const syncToSheets = async (action, payload) => {
                   )}
                 </div>
 
-                {/* TOTAL & SUKLI SECTION */}
                 <div className="bg-white p-4 sm:p-6 border-t-4 border-gray-200 space-y-3 sm:space-y-4">
-                  {/* DISCOUNT / TROPA / TANGGAL-BUTAL SECTION */}
                   {cart.length > 0 && (
                     <div className="space-y-2">
                       <div className="flex justify-between items-center">
@@ -2580,7 +2606,6 @@ const syncToSheets = async (action, payload) => {
                           </label>
 
                           <div className="flex flex-wrap gap-1.5">
-                            {/* TANGGAL BUTAL BUTTONS */}
                             {butalTo5 > 0 && (
                               <button
                                 type="button"
@@ -2600,7 +2625,6 @@ const syncToSheets = async (action, payload) => {
                               </button>
                             )}
 
-                            {/* BALIK-PUHUNAN (TROPA / FAMILY COST PRICE) */}
                             {maxProfitDiscount > 0 && (
                               <button
                                 type="button"
@@ -2611,7 +2635,6 @@ const syncToSheets = async (action, payload) => {
                               </button>
                             )}
 
-                            {/* FIXED PESO DISCOUNTS */}
                             {[5, 10, 20]
                               .filter((d) => d < cartSubtotal)
                               .map((d) => (
@@ -2647,7 +2670,6 @@ const syncToSheets = async (action, payload) => {
                     </div>
                   )}
 
-                  {/* KABUUAN DISPLAY (CENTERED) */}
                   <div className="text-center py-1">
                     <span className="text-gray-500 text-base sm:text-xl font-bold block">
                       KABUUAN:
@@ -2662,7 +2684,6 @@ const syncToSheets = async (action, payload) => {
                     </span>
                   </div>
 
-                  {/* SUKLI CALCULATOR SECTION (CENTERED & BALANCED) */}
                   {cart.length > 0 && (
                     <div className="bg-gray-50 p-3.5 sm:p-4 rounded-xl sm:rounded-2xl border-2 border-gray-200 space-y-3 text-center">
                       <div className="relative flex justify-center items-center">
@@ -2680,7 +2701,6 @@ const syncToSheets = async (action, payload) => {
                         )}
                       </div>
 
-                      {/* MABILISANG BUONG PERA BUTTONS (3x2 SA MOBILE, 6 PANTAY SA DESKTOP) */}
                       <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
                         {[20, 50, 100, 200, 500, 1000].map((bill) => (
                           <button
@@ -2698,7 +2718,6 @@ const syncToSheets = async (action, payload) => {
                         ))}
                       </div>
 
-                      {/* FULL-WIDTH CENTERED SUKLI BOX */}
                       <div
                         className={`w-full p-3 rounded-xl border-2 text-center transition ${
                           sukliAmount !== null
@@ -2790,7 +2809,6 @@ const syncToSheets = async (action, payload) => {
                           </div>
                         </div>
                       )}
-
                       <input
                         type="text"
                         value={utangCustomer}
@@ -2818,7 +2836,6 @@ const syncToSheets = async (action, payload) => {
               </div>
             </div>
 
-            {/* STICKY MOBILE BOTTOM CHECKOUT BAR */}
             {cart.length > 0 && (
               <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-gray-900 text-white px-4 py-3 shadow-2xl z-40 flex justify-between items-center border-t-2 border-emerald-500">
                 <div>
@@ -2851,7 +2868,6 @@ const syncToSheets = async (action, payload) => {
             </div>
 
             <div className="p-4 sm:p-8 grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-10">
-              {/* LEFT: ITEM DETAILS */}
               <div className="space-y-4 sm:space-y-5">
                 <div>
                   <div className="flex justify-between items-center mb-1.5 sm:mb-2">
@@ -2861,14 +2877,14 @@ const syncToSheets = async (action, payload) => {
                     <button
                       type="button"
                       onClick={() => (cameraOpen ? stopCamera() : startCamera())}
-                      className={`px-3 py-1.5 rounded-xl font-black text-xs sm:text-base flex items-center gap-1.5 ${
+                      title={cameraOpen ? 'Isara ang Camera' : 'Buksan ang Camera Scanner'}
+                      className={`w-10 h-10 sm:w-12 sm:h-12 rounded-xl flex items-center justify-center shadow-sm transition shrink-0 active:scale-95 ${
                         cameraOpen
-                          ? 'bg-red-600 text-white'
-                          : 'bg-emerald-600 text-white'
+                          ? 'bg-red-600 text-white hover:bg-red-700'
+                          : 'bg-emerald-600 text-white hover:bg-emerald-700'
                       }`}
                     >
-                      {cameraOpen ? <CameraOff className="w-4 h-4" /> : <Camera className="w-4 h-4" />}
-                      <span>{cameraOpen ? '' : ''}</span>
+                      {cameraOpen ? <CameraOff className="w-4 h-4 sm:w-5 sm:h-5" /> : <Camera className="w-4 h-4 sm:w-5 sm:h-5" />}
                     </button>
                   </div>
 
@@ -2965,7 +2981,6 @@ const syncToSheets = async (action, payload) => {
                     />
                   </div>
 
-                  {/* AUTO-SUGGEST SEARCH DROPDOWN LIST */}
                   {showStockSuggestions && stockSuggestions.length > 0 && (
                     <div className="absolute z-30 left-0 right-0 mt-1 bg-white rounded-2xl shadow-2xl border-2 border-emerald-400 max-h-64 overflow-y-auto divide-y divide-gray-100">
                       <div className="bg-emerald-50 px-3 py-1.5 flex justify-between items-center text-xs font-black text-emerald-800">
@@ -3001,7 +3016,6 @@ const syncToSheets = async (action, payload) => {
                     </div>
                   )}
 
-                  {/* PAST RECORDED COST & PRICE COMPARISON BOX */}
                   {matchedExistingStock && (
                     <div className="mt-2.5 bg-emerald-50 p-3 sm:p-4 rounded-2xl border-2 border-emerald-300 space-y-2">
                       <div className="flex justify-between items-center">
@@ -3061,7 +3075,6 @@ const syncToSheets = async (action, payload) => {
                   )}
                 </div>
 
-                {/* 3. ILANG PIRASO + QUICK ADD PACK BUTTONS + PUHUNAN */}
                 <div className="space-y-2.5">
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div>
@@ -3102,10 +3115,9 @@ const syncToSheets = async (action, payload) => {
                     </div>
                   </div>
 
-                  {/* MABILISANG DAGDAG BILANG BUTTONS */}
                   <div className="flex flex-wrap items-center gap-1.5 bg-gray-50 p-2.5 rounded-xl border border-gray-200">
                     <span className="text-xs font-black text-gray-600 mr-1">
-                      Dagdag Bilang (o i-scan ulit):
+                      Quick Add:
                     </span>
                     {[
                       { label: '-1', val: -1 },
@@ -3113,7 +3125,6 @@ const syncToSheets = async (action, payload) => {
                       { label: '+6', val: 6 },
                       { label: '+10', val: 10 },
                       { label: '+12', val: 12 },
-                      { label: '+24', val: 24 }
                     ].map((btn) => (
                       <button
                         key={btn.label}
@@ -3131,7 +3142,6 @@ const syncToSheets = async (action, payload) => {
                   </div>
                 </div>
 
-                {/* MM/YY EXPIRATION DATE & FAVORITE STAR TOGGLE */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-gray-800 font-black mb-1 text-sm sm:text-lg">
@@ -3186,7 +3196,6 @@ const syncToSheets = async (action, payload) => {
                 </div>
               </div>
 
-              {/* RIGHT: TUBO & SELLING PRICE CALCULATOR */}
               <div className="bg-gray-100 p-4 sm:p-8 rounded-2xl sm:rounded-3xl border-2 sm:border-4 border-gray-200 space-y-4 sm:space-y-6">
                 <h3 className="font-black text-gray-800 text-xl sm:text-3xl">
                   Calculator ng Presyo
@@ -3284,58 +3293,77 @@ const syncToSheets = async (action, payload) => {
         {/* ==================== TAB 3: KITA AT LISTAHAN ==================== */}
         {activeTab === 'reports' && (
           <div className="space-y-5 sm:space-y-8">
-            {/* DAILY MONEY CARDS */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6">
-              <div className="bg-white p-5 sm:p-8 rounded-2xl sm:rounded-3xl shadow-xl border-t-8 border-blue-500">
-                <p className="text-gray-500 font-black text-base sm:text-xl mb-1 sm:mb-2">
-                  Kabuuang Benta at Serbisyo
-                </p>
-                <h3 className="text-3xl sm:text-5xl font-black text-gray-900">
-                  ₱{dailyStats.sales.toFixed(2)}
-                </h3>
-              </div>
-              <div className="bg-white p-5 sm:p-8 rounded-2xl sm:rounded-3xl shadow-xl border-t-8 border-amber-500">
-                <p className="text-gray-500 font-black text-base sm:text-xl mb-1 sm:mb-2">
-                  Itatabing Puhunan (Pang-Grocery)
-                </p>
-                <h3 className="text-3xl sm:text-5xl font-black text-gray-900">
-                  ₱{dailyStats.puhunan.toFixed(2)}
-                </h3>
-                <p className="text-gray-400 font-bold text-xs sm:text-sm mt-1 sm:mt-2">
-                  *Hindi kasama ang GCash principal
-                </p>
-              </div>
-              <div className="bg-white p-5 sm:p-8 rounded-2xl sm:rounded-3xl shadow-xl border-t-8 border-emerald-500">
-                <p className="text-gray-500 font-black text-base sm:text-xl mb-1 sm:mb-2">
-                  Malinis na Tubo (Kabuuang Kita)
-                </p>
-                <h3 className="text-3xl sm:text-5xl font-black text-emerald-600">
-                  ₱{dailyStats.profit.toFixed(2)}
-                </h3>
-                <p className="text-emerald-700 font-bold text-xs sm:text-sm mt-1 sm:mt-2">
-                  Kasama ang ₱{(dailyStats.serviceProfit || 0).toFixed(2)} mula sa GCash at Print
-                </p>
-              </div>
-            </div>
+            {(() => {
+              const activeStats = cloudStats[statsPeriod] || emptyStatsBucket();
+              const periodLabels = {
+                day: 'Ngayong Araw',
+                week: 'Ngayong Linggo',
+                month: 'Ngayong Buwan',
+                year: 'Ngayong Taon'
+              };
 
-            {/* ACTION BUTTONS: NEW DAY RESET & FULL STORAGE CLEAR */}
-            <div className="flex flex-col sm:flex-row justify-end gap-3 sm:gap-4">
-              <button
-                onClick={() => {
-                  if (window.confirm('I-reset ang bilang ng benta at kita para sa bagong araw?')) {
-                    setDailyStats({ sales: 0, profit: 0, puhunan: 0, serviceProfit: 0 });
-                    setServiceLogs([]);
-                    showMessage('Na-reset na ang benta para sa bagong araw!', 'success');
-                  }
-                }}
-                className="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-3 sm:px-6 rounded-xl sm:rounded-2xl font-black text-sm sm:text-lg flex items-center justify-center gap-2"
-              >
-                <RotateCcw className="w-5 h-5" /> Bagong Araw (Reset Kita Ngayon)
-              </button>
+              return (
+                <div className="space-y-4">
+                  <div className="bg-white p-4 sm:p-5 rounded-2xl sm:rounded-3xl shadow-md border-2 border-emerald-100 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                    <div>
+                      <h2 className="text-lg sm:text-2xl font-black text-gray-900">
+                        Kabuuang Kita ng Tindahan
+                      </h2>
+                      <p className="text-xs sm:text-sm font-bold text-gray-500">
+                        Maaring makita ang kita ngayong araw, lingguhan, buwanan, o taon.
+                      </p>
+                    </div>
 
-            </div>
+                    <select
+                      value={statsPeriod}
+                      onChange={(e) => setStatsPeriod(e.target.value)}
+                      className="w-full sm:w-auto px-4 py-2.5 sm:py-3 rounded-xl border-2 border-emerald-500 bg-emerald-50 text-emerald-950 font-black text-sm sm:text-lg outline-none cursor-pointer"
+                    >
+                      <option value="day">Today</option>
+                      <option value="week">Week</option>
+                      <option value="month">Month</option>
+                      <option value="year">Year</option>
+                    </select>
+                  </div>
 
-            {/* RECENT GCASH & PRINT LOGS */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6">
+                    <div className="bg-white p-5 sm:p-8 rounded-2xl sm:rounded-3xl shadow-xl border-t-8 border-blue-500">
+                      <p className="text-gray-500 font-black text-base sm:text-xl mb-1 sm:mb-2">
+                        Kabuuang Benta at Serbisyo
+                      </p>
+                      <h3 className="text-3xl sm:text-5xl font-black text-gray-900">
+                        ₱{activeStats.sales.toFixed(2)}
+                      </h3>
+                    </div>
+
+                    <div className="bg-white p-5 sm:p-8 rounded-2xl sm:rounded-3xl shadow-xl border-t-8 border-amber-500">
+                      <p className="text-gray-500 font-black text-base sm:text-xl mb-1 sm:mb-2">
+                        Itatabing Puhunan (Pang-Grocery)
+                      </p>
+                      <h3 className="text-3xl sm:text-5xl font-black text-gray-900">
+                        ₱{activeStats.puhunan.toFixed(2)}
+                      </h3>
+                      <p className="text-gray-400 font-bold text-xs sm:text-sm mt-1 sm:mt-2">
+                        *Hindi kasama ang GCash principal
+                      </p>
+                    </div>
+
+                    <div className="bg-white p-5 sm:p-8 rounded-2xl sm:rounded-3xl shadow-xl border-t-8 border-emerald-500">
+                      <p className="text-gray-500 font-black text-base sm:text-xl mb-1 sm:mb-2">
+                        Malinis na Tubo (Kabuuang Kita)
+                      </p>
+                      <h3 className="text-3xl sm:text-5xl font-black text-emerald-600">
+                        ₱{activeStats.profit.toFixed(2)}
+                      </h3>
+                      <p className="text-emerald-700 font-bold text-xs sm:text-sm mt-1 sm:mt-2">
+                        Kasama ang ₱{(activeStats.serviceProfit || 0).toFixed(2)} mula sa GCash at Print
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
             {serviceLogs.length > 0 && (
               <div className="bg-white rounded-2xl sm:rounded-3xl shadow-xl border-2 sm:border-4 border-blue-100 overflow-hidden">
                 <div className="bg-blue-50 p-4 sm:p-5 border-b-2 border-blue-200">
@@ -3366,11 +3394,7 @@ const syncToSheets = async (action, payload) => {
               </div>
             )}
 
-            
-
-            {/* UTANG & PAUBOS NA STOCK */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 sm:gap-8">
-              {/* LISTA NG UTANG (FIXED MOBILE VIEW) */}
               <div className="bg-white rounded-2xl sm:rounded-3xl shadow-xl border-2 sm:border-4 border-amber-100 overflow-hidden">
                 <div className="bg-amber-50 p-4 sm:p-6 border-b-2 border-amber-200">
                   <h3 className="text-lg sm:text-2xl font-black text-amber-900 flex items-center gap-2">
@@ -3410,7 +3434,6 @@ const syncToSheets = async (action, payload) => {
                           </div>
                         </div>
 
-                        {/* PANTAY NA 2-COLUMN BUTTONS SA MOBILE */}
                         <div className="grid grid-cols-2 gap-2 pt-1">
                           <button
                             type="button"
@@ -3436,7 +3459,6 @@ const syncToSheets = async (action, payload) => {
                           </button>
                         </div>
 
-                        {/* MOBILE-SAFE HULOG INPUT DRAWER (WALANG OVERFLOW) */}
                         {activeHulogId === u.id && (
                           <div className="bg-white p-3 sm:p-4 rounded-xl border-2 border-amber-400 space-y-2.5">
                             <label className="block text-amber-900 font-black text-xs sm:text-base">
@@ -3538,7 +3560,7 @@ const syncToSheets = async (action, payload) => {
               </div>
             </div>
             
-            {/* 🍾 BANTAY BOTE AT DEPOSITO (SOFTDRINKS / BEER) */}
+            {/* 🍾 BANTAY BOTE AT DEPOSITO */}
             {(() => {
               const borrowedCount = (boteData.borrowedList || []).reduce(
                 (sum, b) => sum + Number(b.qty || 0),
@@ -3571,7 +3593,6 @@ const syncToSheets = async (action, payload) => {
                   </div>
 
                   <div className="p-4 sm:p-6 space-y-5">
-                    {/* 3 BOTE SUMMARY CARDS */}
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                       <div className="p-3.5 sm:p-4 rounded-2xl bg-gray-50 border-2 border-gray-200 flex flex-col justify-between">
                         <span className="text-xs sm:text-sm font-black text-gray-500">
@@ -3631,7 +3652,6 @@ const syncToSheets = async (action, payload) => {
                       </div>
                     </div>
 
-                    {/* FORM PARA MAGLISTA NG KUMUHA NG BOTE */}
                     {showBoteForm && (
                       <div className="bg-teal-50/70 p-4 rounded-2xl border-2 border-teal-300 space-y-3">
                         <h4 className="font-black text-teal-900 text-base sm:text-lg">
@@ -3733,7 +3753,6 @@ const syncToSheets = async (action, payload) => {
                       </div>
                     )}
 
-                    {/* LISTAHAN NG MGA HIRAM NA BOTE */}
                     <div className="space-y-2.5 max-h-[340px] overflow-y-auto">
                       {(boteData.borrowedList || []).length === 0 ? (
                         <p className="text-gray-400 text-sm sm:text-lg font-bold text-center py-4">
