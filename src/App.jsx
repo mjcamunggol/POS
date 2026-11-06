@@ -2644,16 +2644,6 @@ const App = () => {
                               </button>
                             )}
 
-                            {maxProfitDiscount > 0 && (
-                              <button
-                                type="button"
-                                onClick={() => setDiscountAmount(maxProfitDiscount.toFixed(2))}
-                                className="px-2.5 py-1.5 bg-pink-200 hover:bg-pink-300 text-pink-950 rounded-xl font-black text-xs border border-pink-400"
-                              >
-                                Libre (-₱{maxProfitDiscount.toFixed(2)})
-                              </button>
-                            )}
-
                             {[5, 10, 20]
                               .filter((d) => d < cartSubtotal)
                               .map((d) => (
