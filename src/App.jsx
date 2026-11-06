@@ -347,6 +347,9 @@ const App = () => {
         if (data.stats) {
           setCloudStats(data.stats);
         }
+        if (data.serviceLogs) {
+          setServiceLogs(data.serviceLogs);
+        }
         setSyncStatus('🟢');
       } catch {
         setSyncStatus('Offline (Saved sa Device)');
@@ -872,7 +875,8 @@ const App = () => {
       type: `GCASH/BANK ${gcashType}`,
       principal: amt,
       fee: fee,
-      time: new Date().toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' })
+      time: new Date().toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' }),
+      timestamp: new Date().toISOString() // KINAKAILANGAN PARA SA CLOUD DATE FILTER
     };
 
     updateLocalStatsBuckets(fee, fee, 0, fee);
@@ -882,7 +886,8 @@ const App = () => {
       serviceType: `GCASH/BANK ${gcashType}`,
       principal: amt,
       fee: fee,
-      details: `📱 ${gcashType}: ₱${amt.toFixed(2)} (Tubo/Fee: ₱${fee.toFixed(2)})`
+      details: `📱 ${gcashType}: ₱${amt.toFixed(2)} (Tubo/Fee: ₱${fee.toFixed(2)})`,
+      newServiceLog: logEntry // Ipadala sa server!
     });
 
     playBeep('success');
@@ -1121,24 +1126,23 @@ const App = () => {
     } else {
       updateLocalStatsBuckets(saleTotal, profitTotal, totalCost, serviceRevenue);
 
+      let printLogEntry = null; 
       if (serviceRevenue > 0) {
         const printSummary = cart
           .filter((c) => c.isService)
           .map((c) => `${c.cartQty}x ${c.name}`)
           .join(', ');
-        setServiceLogs((prev) => [
-          {
-            id: createItemId(),
-            type: printSummary,
-            principal: serviceRevenue,
-            fee: serviceRevenue,
-            time: new Date().toLocaleTimeString('en-PH', {
-              hour: '2-digit',
-              minute: '2-digit'
-            })
-          },
-          ...prev.slice(0, 29)
-        ]);
+        
+        printLogEntry = {
+          id: createItemId(),
+          type: printSummary,
+          principal: serviceRevenue,
+          fee: serviceRevenue,
+          time: new Date().toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' }),
+          timestamp: new Date().toISOString()
+        };
+        
+        setServiceLogs((prev) => [printLogEntry, ...prev.slice(0, 29)]);
       }
 
       const ledgerItems =
@@ -1154,7 +1158,8 @@ const App = () => {
         items: ledgerItems,
         saleTotal,
         profitTotal,
-        inventory: updatedInventory
+        inventory: updatedInventory,
+        newServiceLog: printLogEntry
       });
 
       if (priceDropAlerts.length > 0) {
@@ -3079,7 +3084,7 @@ const App = () => {
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div>
                       <label className="block text-gray-800 font-black mb-1 text-sm sm:text-lg">
-                        3. Ilang Piraso?
+                        Ilang Piraso?
                       </label>
                       <input
                         type="number"
@@ -3245,7 +3250,7 @@ const App = () => {
                 <div>
                   <div className="flex flex-wrap justify-between items-center gap-2 mb-2 sm:mb-3">
                     <label className="text-gray-800 font-black text-base sm:text-2xl">
-                      5. Presyo ng Benta:
+                      Presyo ng Benta:
                     </label>
                     <button
                       type="button"
